@@ -935,30 +935,33 @@ class RealExecutionRotatorBot:
             self.log_event(f"Error fetching balance: {self._exchange_error(e)}")
             balance_info = {'free': 5000.0, 'total': 5000.0}
 
-        for symbol in self.active_assets:
-            df = self.fetch_market_data(symbol)
-            if df is not None:
-                last_row = df.iloc[-1]
-                signal = self.check_signals(symbol, df)
-                
-                vol_sma = last_row['vol_sma']
-                markets_state[symbol] = {
-                    'price': last_row['close'],
-                    'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
-                    'adx': last_row['adx'],
-                    'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
-                    'signal': signal,
-                    'trigger_long': last_row['donchian_high'],
-                    'trigger_short': last_row['donchian_low']
-                }
-            else:
-                markets_state[symbol] = {
-                    'price': 0.0,
-                    'trend': 'UNKNOWN',
-                    'adx': 0.0,
-                    'vol_ratio': 1.0,
-                    'signal': 'ERROR_DATA'
-                }
+        try:
+            for symbol in self.active_assets:
+                df = self.fetch_market_data(symbol)
+                if df is not None:
+                    last_row = df.iloc[-1]
+                    signal = self.check_signals(symbol, df)
+
+                    vol_sma = last_row['vol_sma']
+                    markets_state[symbol] = {
+                        'price': last_row['close'],
+                        'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
+                        'adx': last_row['adx'],
+                        'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
+                        'signal': signal,
+                        'trigger_long': last_row['donchian_high'],
+                        'trigger_short': last_row['donchian_low']
+                    }
+                else:
+                    markets_state[symbol] = {
+                        'price': 0.0,
+                        'trend': 'UNKNOWN',
+                        'adx': 0.0,
+                        'vol_ratio': 1.0,
+                        'signal': 'ERROR_DATA'
+                    }
+        except Exception as e:
+            self.log_event(f"Error in market tick: {self._exchange_error(e)}")
 
         self.render_dashboard(markets_state, balance_info)
 
@@ -1006,13 +1009,20 @@ if __name__ == "__main__":
                         # Update Daily Scan scheduled times
                         if bot.last_scan_time is None or datetime.now() >= bot.next_scan_time:
                             bot.scan_daily_market()
-                            
-                        # Fetch balance and market data
+                    except Exception as e:
+                        bot.log_event(f"Error in daily scan: {bot._exchange_error(e)}")
+
+                    try:
+                        # Fetch balance
                         balance = bot.trade_client.fetch_balance()
                         usdt_free = balance['free'].get('USDT', 5000.0)
                         usdt_total = balance['total'].get('USDT', 5000.0)
                         balance_info = {'free': usdt_free, 'total': usdt_total}
-                        
+                    except Exception as e:
+                        bot.log_event(f"Error fetching balance: {bot._exchange_error(e)}")
+                        balance_info = {'free': 5000.0, 'total': 5000.0}
+
+                    try:
                         for symbol in bot.active_assets:
                             df = bot.fetch_market_data(symbol)
                             if df is not None:

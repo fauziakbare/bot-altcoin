@@ -70,12 +70,19 @@ def bot_worker():
                 try:
                     if bot.last_scan_time is None or datetime.now() >= bot.next_scan_time:
                         bot.scan_daily_market()
+                except Exception as e:
+                    logger.error("Error in daily scan: %s", e)
 
+                try:
                     balance = bot.trade_client.fetch_balance()
                     usdt_free = balance['free'].get('USDT', 5000.0)
                     usdt_total = balance['total'].get('USDT', 5000.0)
                     balance_info = {'free': usdt_free, 'total': usdt_total}
+                except Exception as e:
+                    logger.error("Error fetching balance: %s", e)
+                    balance_info = {'free': 0.0, 'total': 0.0}
 
+                try:
                     for symbol in bot.active_assets:
                         df = bot.fetch_market_data(symbol)
                         if df is not None:
