@@ -166,6 +166,7 @@ class RealExecutionRotatorBot:
     def __init__(self, api_key, api_secret, use_render_mode=False):
         self.use_render_mode = use_render_mode
         self.console = Console() if RICH_AVAILABLE else None
+        self.logs = []
         
         # Connect to Binance Futures USD-M Demo Trading
         # NOTE: Binance Futures TESTNET/sandbox sudah di-deprecate.
@@ -207,7 +208,6 @@ class RealExecutionRotatorBot:
         self.use_turso = TURSO_AVAILABLE and self.turso_url and self.turso_token
         self.db_conn = None
         
-        self.logs = []
         self.positions = {}  # Tracks real active positions
         self.active_assets = []  # Curated koin to trade
         self.scanner_results = {} 
@@ -225,6 +225,8 @@ class RealExecutionRotatorBot:
         self.init_database()
 
     def log_event(self, message):
+        if not hasattr(self, 'logs'):
+            self.logs = []
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_str = f"[{timestamp}] {message}"
         self.logs.append(log_str)
