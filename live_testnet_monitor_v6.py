@@ -198,6 +198,7 @@ class RealExecutionRotatorBot:
                 }
             }
             self.exchange.sandbox = True
+            self.exchange.baseUrl = 'https://demo-fapi.binance.com'
             self.log_event("🔧 Demo Trading mode ENABLED (demo-fapi.binance.com)")
         else:
             self.log_event("🔧 Live Mainnet mode (production)")
