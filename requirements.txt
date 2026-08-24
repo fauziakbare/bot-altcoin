@@ -13,8 +13,5 @@ matplotlib>=3.7.0
 # Terminal UI
 rich>=13.0.0
 
-# Turso (SQLite-compatible cloud DB)
-libsql-experimental>=0.3.0
-
 # Web server for Render free web service
 Flask>=2.3.0

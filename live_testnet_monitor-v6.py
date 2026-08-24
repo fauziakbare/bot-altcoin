@@ -10,12 +10,20 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from contextlib import closing
 
-# Turso (SQLite-compatible cloud DB)
+# Turso (SQLite-compatible cloud DB) - fallback if not available
 try:
     from libsql_experimental import connect as turso_connect
     TURSO_AVAILABLE = True
 except ImportError:
     TURSO_AVAILABLE = False
+    # Fallback to local SQLite if Turso not installed
+    import sqlite3
+    def turso_connect(url, auth_token=None):
+        # Return a SQLite connection to local DB path
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'trade_history.db')
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        return sqlite3.connect(db_path)
+    print("[WARN] libsql-experimental not available, falling back to local SQLite")
 
 # Import Rich components for a stunning terminal UI
 try:
