@@ -167,60 +167,103 @@ class RealExecutionRotatorBot:
         self.use_render_mode = use_render_mode
         self.console = Console() if RICH_AVAILABLE else None
         self.logs = []
+
+        # Sanitize API credentials: strip whitespace/newlines/quoting noise
+        # that .env files or copy-paste can easily introduce.
+        api_key = (api_key or "").strip()
+        api_secret = (api_secret or "").strip()
+        if not api_key or not api_secret:
+            self.log_event("❌ WARNING: BINANCE_API_KEY/API_SECRET kosong setelah sanitasi.")
         
-        # Connect to Binance Futures USD-M Demo Trading
-        # NOTE: Binance Futures TESTNET/sandbox sudah di-deprecate.
-        # Pengganti: Demo Trading (endpoint demo-fapi.binance.com).
-        # Butuh API Key/Secret Demo Trading, bukan key testnet lama.
-        # Buat key di binance.com -> Futures -> Demo Trading.
-        self.exchange = ccxt.binanceusdm({
+        # ---------------------------------------------------------------
+        # DUAL CLIENT ARCHITECTURE
+        # ---------------------------------------------------------------
+        # (a) market_client -> Binance Futures MAINNET public (NO API key).
+        #     Only used for fetch_ohlcv so historical candles and indicators
+        #     are complete/accurate (testnet candles can be thin or missing).
+        self.market_client = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'future',
+                'adjustForTimeDifference': True,
+            },
+        })
+
+        # Determine environment: testnet (legacy), demo, or mainnet
+        use_testnet = os.getenv("USE_TESTNET", "false").lower() == "true"
+        enable_demo = os.getenv("ENABLE_DEMO_TRADING", "false").lower() == "true"
+
+        # (b) trade_client -> Binance Futures with API key.
+        #     Only used for balance, positions, leverage/margin, and orders.
+        #     Demo/testnet mode overrides the REST endpoints to demo-fapi.binance.com
+        #     because CCXT deprecated set_sandbox_mode for the old testnet.
+        trade_client_config = {
             'apiKey': api_key,
             'secret': api_secret,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'future',
-                'adjustForTimeDifference': True
-            }
-        })
-
-        # Determine environment: testnet, demo, or mainnet
-        use_testnet = os.getenv("USE_TESTNET", "false").lower() == "true"
-        enable_demo = os.getenv("ENABLE_DEMO_TRADING", "false").lower() == "true"
-
-        if use_testnet:
-            # Binance Futures Testnet (official testnet endpoint)
-            self.exchange.urls = {
+                'adjustForTimeDifference': True,
+            },
+        }
+        if use_testnet or enable_demo:
+            # Complete demo override: every USDT-M (fapi) and COIN-M (dapi)
+            # endpoint is routed to Binance Futures Demo Trading host.
+            # Keys mirror ccxt.binance.describe()['urls']['api'] for futures.
+            demo_base = 'https://demo-fapi.binance.com'
+            trade_client_config['urls'] = {
                 'api': {
-                    'public': 'https://testnet.binancefuture.com/fapi/v1',
-                    'private': 'https://testnet.binancefuture.com/fapi/v1',
-                    'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
-                    'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
-                    'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2',
-                    'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
-                    'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3',
-                    'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3'
+                    # USDT-M Futures (fapi) — public + private v1/v2/v3 + data
+                    'fapi': f'{demo_base}/fapi/v1',
+                    'fapiPublic': f'{demo_base}/fapi/v1',
+                    'fapiPublicV2': f'{demo_base}/fapi/v2',
+                    'fapiPublicV3': f'{demo_base}/fapi/v3',
+                    'fapiPrivate': f'{demo_base}/fapi/v1',
+                    'fapiPrivateV2': f'{demo_base}/fapi/v2',
+                    'fapiPrivateV3': f'{demo_base}/fapi/v3',
+                    'fapiData': f'{demo_base}/futures/data',
+                    'fapiDataV2': f'{demo_base}/futures/data',
+                    # COIN-M Futures (dapi) — public + private v1/v2 + data
+                    'dapi': f'{demo_base}/dapi/v1',
+                    'dapiPublic': f'{demo_base}/dapi/v1',
+                    'dapiPrivate': f'{demo_base}/dapi/v1',
+                    'dapiPrivateV2': f'{demo_base}/dapi/v2',
+                    'dapiData': f'{demo_base}/futures/data',
+                    'dapiDataV2': f'{demo_base}/futures/data',
+                    # USDT-M Wallet/Account (sapi) — used by fetch_balance for futures mode.
+                    # Must be overridden too, or signed balance calls hit mainnet api.binance.com
+                    # and error with -2008 Invalid Api-Key. Demo wallet host = demo-bapi.
+                    'sapi': 'https://demo-bapi.binance.com/bapi/v1',
+                    'sapiV2': 'https://demo-bapi.binance.com/bapi/v2',
+                    'sapiV3': 'https://demo-bapi.binance.com/bapi/v3',
+                    'sapiV4': 'https://demo-bapi.binance.com/bapi/v4',
                 }
             }
-            self.exchange.baseUrl = 'https://testnet.binancefuture.com/fapi/v1'
-            self.exchange.sandbox = True
-            self.log_event("🔧 Testnet mode ENABLED (testnet.binancefuture.com)")
-        elif enable_demo:
-            # Binance Futures Demo Trading (demo-fapi.binance.com)
-            self.exchange.urls = {
-                'api': {
-                    'public': 'https://demo-fapi.binance.com/fapi/v1',
-                    'private': 'https://demo-fapi.binance.com/fapi/v1',
-                    'fapiPublic': 'https://demo-fapi.binance.com/fapi/v1',
-                    'fapiPrivate': 'https://demo-fapi.binance.com/fapi/v1',
-                    'fapiPublicV2': 'https://demo-fapi.binance.com/fapi/v2',
-                    'fapiPrivateV2': 'https://demo-fapi.binance.com/fapi/v2'
-                }
-            }
-            self.exchange.sandbox = True
-            self.exchange.baseUrl = 'https://demo-fapi.binance.com'
-            self.log_event("🔧 Demo Trading mode ENABLED (demo-fapi.binance.com)")
-        else:
-            self.log_event("🔧 Live Mainnet mode (production)")
+
+        try:
+            self.trade_client = ccxt.binance(trade_client_config)
+            if use_testnet or enable_demo:
+                mode_label = "Demo Trading" if enable_demo else "Testnet"
+                self.log_event(f"🔧 {mode_label} mode ENABLED (demo-fapi.binance.com)")
+            else:
+                self.log_event("🔧 Live Mainnet mode (production)")
+
+            # [AUTH DEBUG] host + key prefix — never log full key/secret
+            market_host = self.market_client.urls['api'].get('fapiPublic', '?')
+            trade_host = self.trade_client.urls['api'].get('fapiPrivate', '?')
+            key_prefix = api_key[:6] if api_key else '(empty)'
+            print(f"[AUTH DEBUG] market_client host = {market_host}")
+            print(f"[AUTH DEBUG] trade_client host = {trade_host}")
+            print(f"[AUTH DEBUG] api_key prefix = {key_prefix} (length={len(api_key)})")
+            print(f"[AUTH DEBUG] api_secret length = {len(api_secret)} (content hidden)")
+            print(f"[AUTH DEBUG] defaultType=future | ALL signed requests -> {trade_host}")
+            if trade_host and 'demo-fapi' in trade_host:
+                print("[AUTH DEBUG] ROUTE OK: private futures endpoints -> demo-fapi.binance.com")
+            else:
+                print("[AUTH DEBUG] ROUTE WARNING: trade_client NOT on demo-fapi host!")
+        except Exception as e:
+            self.trade_client = None
+            self.log_event(f"❌ Gagal inisialisasi trade_client: {self._exchange_error(e)}")
 
         # Turso configuration (cloud SQLite)
         self.turso_url = os.getenv("TURSO_DB_URL")
@@ -254,6 +297,22 @@ class RealExecutionRotatorBot:
             self.logs.pop(0)
         print(log_str)
         logging.info(log_str)
+
+    @staticmethod
+    def _exchange_error(e):
+        """Return class name, message, and any Binance error code/response."""
+        detail_parts = []
+        for attr in ('name', 'code', 'status_code'):
+            val = getattr(e, attr, None)
+            if val is not None:
+                detail_parts.append(f"{attr}={val}")
+        raw = getattr(e, 'response', None)
+        if isinstance(raw, str):
+            detail_parts.append(f"response={raw[:300]}")
+        elif isinstance(raw, dict):
+            detail_parts.append(f"response={str(raw)[:300]}")
+        suffix = f" [{' | '.join(detail_parts)}]" if detail_parts else ""
+        return f"{type(e).__name__}: {str(e)}{suffix}"
 
     def init_database(self):
         """
@@ -374,7 +433,7 @@ class RealExecutionRotatorBot:
         for symbol in CANDIDATE_ASSETS:
             try:
                 # Fetch last 35 daily candles to compute indicators
-                ohlcv = self.exchange.fetch_ohlcv(symbol, '1d', limit=35)
+                ohlcv = self.market_client.fetch_ohlcv(symbol, '1d', limit=35)
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df = calculate_daily_metrics(df)
                 
@@ -396,7 +455,7 @@ class RealExecutionRotatorBot:
                 time.sleep(0.5)
                 
             except Exception as e:
-                self.log_event(f"Gagal memindai data harian untuk {symbol}: {str(e)}")
+                self.log_event(f"Gagal memindai data harian untuk {symbol}: {self._exchange_error(e)}")
                 
         # Sort candidates
         candidates_stats.sort(key=lambda x: x['rank_score'], reverse=True)
@@ -429,30 +488,39 @@ class RealExecutionRotatorBot:
 
     def setup_leverage_and_margin(self, symbol):
         """
-        Configures Isolated Margin and 10x Leverage on Binance Testnet for the asset.
+        Configures Isolated Margin and 10x Leverage on Binance for the asset.
+        Errors from the exchange are logged clearly without stopping the bot.
         """
+        if self.trade_client is None:
+            self.log_event(f"⚠️ trade_client tidak tersedia (init gagal), lewati setup leverage/margin untuk {symbol}")
+            return
+
         try:
             # Set isolated margin mode
             try:
-                self.exchange.set_margin_mode('ISOLATED', symbol)
+                self.trade_client.set_margin_mode('ISOLATED', symbol)
                 self.log_event(f"⚙️ {symbol.split('/')[0]} disetel ke ISOLATED margin mode.")
-            except Exception:
-                pass  # Ignore if already set to isolated
+            except Exception as e:
+                # Ignore only the "already isolated" case; log other errors.
+                self.log_event(f"⚙️ Margin mode ISOLATED sudah/error untuk {symbol}: {self._exchange_error(e)}")
                 
             # Set leverage to 10x
-            self.exchange.set_leverage(LEVERAGE, symbol)
-            self.log_event(f"⚙️ {symbol.split('/')[0]} disetel ke Leverage {LEVERAGE}x.")
+            try:
+                self.trade_client.set_leverage(LEVERAGE, symbol)
+                self.log_event(f"⚙️ {symbol.split('/')[0]} disetel ke Leverage {LEVERAGE}x.")
+            except Exception as e:
+                self.log_event(f"⚙️ Leverage gagal untuk {symbol}: {self._exchange_error(e)}")
         except Exception as e:
-            self.log_event(f"Gagal mengatur leverage/margin untuk {symbol}: {str(e)}")
+            self.log_event(f"Gagal mengatur leverage/margin untuk {symbol}: {self._exchange_error(e)}")
 
     def fetch_market_data(self, symbol):
         try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
+            ohlcv = self.market_client.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
             return calculate_indicators(df)
         except Exception as e:
-            self.log_event(f"Error fetching 15M data untuk {symbol}: {str(e)}")
+            self.log_event(f"Error fetching 15M data untuk {symbol}: {self._exchange_error(e)}")
             return None
 
     def check_signals(self, symbol, df):
@@ -529,16 +597,16 @@ class RealExecutionRotatorBot:
             
             # Format quantity to match Binance lot step size rules
             # We fetch precision rules from the symbol info dynamically
-            market_info = self.exchange.market(symbol)
+            market_info = self.trade_client.market(symbol)
             precision = market_info['precision']['amount']
-            quantity = self.exchange.amount_to_precision(symbol, quantity)
+            quantity = self.trade_client.amount_to_precision(symbol, quantity)
             quantity = float(quantity)
             
             self.log_event(f"🛒 [TESTNET] Mengirim market order {side} {symbol} sebanyak {quantity} unit (Margin: {COLLATERAL_PER_TRADE} USDT)...")
             
             # 2. Execute Market Order on Binance
             order_side = 'buy' if side == 'LONG' else 'sell'
-            response = self.exchange.create_market_order(symbol, order_side, quantity)
+            response = self.trade_client.create_market_order(symbol, order_side, quantity)
             executed_price = response.get('price', entry_price)
             
             # Calculate SL and TP levels
@@ -560,7 +628,7 @@ class RealExecutionRotatorBot:
             self.log_event(f"🚀 POSISI TERBUKA: {side} {symbol} @ {executed_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Qty: {quantity}")
             
         except Exception as e:
-            self.log_event(f"❌ GAGAL MEMBUKA POSISI untuk {symbol}: {str(e)}")
+            self.log_event(f"❌ GAGAL MEMBUKA POSISI untuk {symbol}: {self._exchange_error(e)}")
 
     def close_position(self, symbol, exit_price, reason):
         """
@@ -576,7 +644,7 @@ class RealExecutionRotatorBot:
             
             # Execute closing market order (opposite direction, reduceOnly=True)
             close_side = 'sell' if side == 'LONG' else 'buy'
-            response = self.exchange.create_market_order(symbol, close_side, quantity, params={'reduceOnly': True})
+            response = self.trade_client.create_market_order(symbol, close_side, quantity, params={'reduceOnly': True})
             executed_price = response.get('price', exit_price)
             
             # Calculate returns
@@ -602,7 +670,7 @@ class RealExecutionRotatorBot:
             del self.positions[symbol]
             
         except Exception as e:
-            self.log_event(f"❌ GAGAL MENUTUP POSISI untuk {symbol}: {str(e)}")
+            self.log_event(f"❌ GAGAL MENUTUP POSISI untuk {symbol}: {self._exchange_error(e)}")
 
     def render_dashboard(self, markets_state, balance_info):
         """
@@ -752,12 +820,12 @@ class RealExecutionRotatorBot:
             
         markets_state = {}
         try:
-            balance = self.exchange.fetch_balance()
+            balance = self.trade_client.fetch_balance()
             usdt_free = balance['free'].get('USDT', 5000.0)
             usdt_total = balance['total'].get('USDT', 5000.0)
             balance_info = {'free': usdt_free, 'total': usdt_total}
         except Exception as e:
-            self.log_event(f"Error fetching balance: {str(e)}")
+            self.log_event(f"Error fetching balance: {self._exchange_error(e)}")
             balance_info = {'free': 5000.0, 'total': 5000.0}
 
         for symbol in self.active_assets:
@@ -791,7 +859,7 @@ class RealExecutionRotatorBot:
 # MAIN RUNNER WITH LIVE TICKING SECONDS
 # ==========================================
 if __name__ == "__main__":
-    load_dotenv()  # wajib: ambil BINANCE_API_KEY/SECRET dari .env
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))  # wajib: ambil BINANCE_API_KEY/SECRET dari .env
 
     # Setup logging
     os.makedirs('logs', exist_ok=True)
@@ -829,7 +897,7 @@ if __name__ == "__main__":
                             bot.scan_daily_market()
                             
                         # Fetch balance and market data
-                        balance = bot.exchange.fetch_balance()
+                        balance = bot.trade_client.fetch_balance()
                         usdt_free = balance['free'].get('USDT', 5000.0)
                         usdt_total = balance['total'].get('USDT', 5000.0)
                         balance_info = {'free': usdt_free, 'total': usdt_total}
@@ -850,7 +918,7 @@ if __name__ == "__main__":
                                     'trigger_short': last_row['donchian_low']
                                 }
                     except Exception as e:
-                        bot.log_event(f"Error in market tick: {str(e)}")
+                        bot.log_event(f"Error in market tick: {bot._exchange_error(e)}")
                     
                     # Reset counter to 15 seconds
                     bot.seconds_until_refresh = 15
