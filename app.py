@@ -1,0 +1,139 @@
+import os
+import time
+import threading
+import logging
+from datetime import datetime
+from flask import Flask, request, Response, jsonify
+from functools import wraps
+from dotenv import load_dotenv
+
+# Import bot class from main script
+from live_testnet_monitor_v6 import RealExecutionRotatorBot
+
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# Basic auth config
+WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
+WEB_PASSWORD = os.getenv("WEB_PASSWORD", "changeme")
+
+def check_auth(username, password):
+    return username == WEB_USERNAME and password == WEB_PASSWORD
+
+def authenticate():
+    return Response(
+        'Could not verify your access level for that URL.\n'
+        'You have to login with proper credentials', 401,
+        {'WWW-Authenticate': 'Basic realm="Login Required"'}
+    )
+
+def requires_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return authenticate()
+        return f(*args, **kwargs)
+    return decorated
+
+# Bot instance
+bot = None
+bot_thread = None
+bot_running = False
+
+def bot_worker():
+    global bot, bot_running
+    try:
+        api_key = os.getenv("BINANCE_API_KEY")
+        api_secret = os.getenv("BINANCE_API_SECRET")
+        if not api_key or not api_secret:
+            logger.error("Missing BINANCE_API_KEY or BINANCE_API_SECRET")
+            return
+        bot = RealExecutionRotatorBot(api_key=api_key, api_secret=api_secret, use_render_mode=True)
+        bot_running = True
+        logger.info("Bot worker started")
+
+        # Replicate the main loop from v6 __main__ (lines 779-826)
+        bot.seconds_until_refresh = 0
+        markets_state = {}
+        balance_info = {'free': 5000.0, 'total': 5000.0}
+
+        while True:
+            if bot.seconds_until_refresh <= 0:
+                try:
+                    if bot.last_scan_time is None or datetime.now() >= bot.next_scan_time:
+                        bot.scan_daily_market()
+
+                    balance = bot.exchange.fetch_balance()
+                    usdt_free = balance['free'].get('USDT', 5000.0)
+                    usdt_total = balance['total'].get('USDT', 5000.0)
+                    balance_info = {'free': usdt_free, 'total': usdt_total}
+
+                    for symbol in bot.active_assets:
+                        df = bot.fetch_market_data(symbol)
+                        if df is not None:
+                            last_row = df.iloc[-1]
+                            signal = bot.check_signals(symbol, df)
+                            vol_sma = last_row['vol_sma']
+                            markets_state[symbol] = {
+                                'price': last_row['close'],
+                                'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
+                                'adx': last_row['adx'],
+                                'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
+                                'signal': signal,
+                                'trigger_long': last_row['donchian_high'],
+                                'trigger_short': last_row['donchian_low']
+                            }
+                except Exception as e:
+                    logger.error("Error in market tick: %s", e)
+
+                bot.seconds_until_refresh = 15
+
+            bot.render_dashboard(markets_state, balance_info)
+            time.sleep(1)
+            bot.seconds_until_refresh -= 1
+
+    except Exception as e:
+        logger.exception("Bot worker crashed: %s", e)
+        bot_running = False
+
+# Routes
+@app.route('/')
+@requires_auth
+def index():
+    status = "running" if bot_running else "stopped"
+    return f"Bot status: {status}\nActive assets: {bot.active_assets if bot else 'None'}\nLast scan: {bot.last_scan_time if bot else 'Never'}"
+
+@app.route('/ping')
+def ping():
+    return "pong", 200
+
+@app.route('/status')
+@requires_auth
+def status():
+    if bot is None:
+        return jsonify({"status": "not_initialized"})
+    return jsonify({
+        "status": "running" if bot_running else "stopped",
+        "active_assets": bot.active_assets if bot else [],
+        "last_scan": bot.last_scan_time.isoformat() if bot.last_scan_time else None,
+        "positions": list(bot.positions.keys()) if bot else []
+    })
+
+def start_bot_thread():
+    global bot_thread
+    if bot_thread is None or not bot_thread.is_alive():
+        bot_thread = threading.Thread(target=bot_worker, daemon=True)
+        bot_thread.start()
+        logger.info("Bot thread started")
+
+if __name__ == "__main__":
+    start_bot_thread()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
