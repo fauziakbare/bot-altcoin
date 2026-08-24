@@ -290,7 +290,7 @@ class RealExecutionRotatorBot:
             self.internal_to_binance[sym] = binance_sym
         # Subscribe to 15m klines for all candidates
         for symbol in CANDIDATE_ASSETS:
-            self.bsm.start_kline_socket(self.internal_to_binance[symbol], self._handle_kline, interval='15m')
+            self.bsm.start_kline_socket(self.internal_to_binance[symbol], self._handle_kline, '15m')
         self.log_event("🔌 WebSocket kline subscriptions started for all candidates")
 
         # Turso configuration (cloud SQLite)
