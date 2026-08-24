@@ -268,12 +268,21 @@ class RealExecutionRotatorBot:
             self.log_event(f"❌ Gagal inisialisasi trade_client: {self._exchange_error(e)}")
 
         # WebSocket for market data (to avoid REST rate limits)
+        self._session_banned = False
         self.bsm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
-        self.bsm.start()
+        try:
+            self.bsm.start()
+        except Exception as e:
+            self.log_event(f"⚠️ WebSocket manager start failed (will continue on REST): {self._exchange_error(e)}")
         self.klines_cache = {}  # symbol -> list of klines (OHLCV)
         self._cache_lock = threading.Lock()
-        # Pre-fetch initial 250 candles for each candidate via REST
+        # Pre-fetch initial 250 candles for each candidate via REST.
+        # Throttle hard and stop on DDoS/ban (-1003) to avoid exceeding weight
+        # and getting the shared Render IP banned.
         for symbol in CANDIDATE_ASSETS:
+            if self._session_banned:
+                self.log_event(f"⛔ IP banned/dDoS -199, skipping pre-fetch for {symbol}")
+                break
             try:
                 ohlcv = self.market_client.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
                 with self._cache_lock:
@@ -281,6 +290,12 @@ class RealExecutionRotatorBot:
                 self.log_event(f"📡 Pre-fetched {CANDLE_LIMIT} candles for {symbol}")
             except Exception as e:
                 self.log_event(f"❌ Pre-fetch failed for {symbol}: {self._exchange_error(e)}")
+                if self._is_ban(e):
+                    self.log_event("⛔ Binance IP ban detected — aborting REST pre-fetch.")
+                    break
+            # 1.2s gap between klines requests: 10 symbols x weight stays well
+            # under Binance's 2400/min futures weight budget.
+            time.sleep(1.2)
         # Build symbol mappings for WebSocket
         self.binance_to_internal = {}
         self.internal_to_binance = {}
@@ -289,9 +304,17 @@ class RealExecutionRotatorBot:
             self.binance_to_internal[binance_sym] = sym
             self.internal_to_binance[sym] = binance_sym
         # Subscribe to 15m klines for all candidates
+        ws_started = 0
         for symbol in CANDIDATE_ASSETS:
-            self.bsm.start_kline_socket(self._handle_kline, self.internal_to_binance[symbol], '15m')
-        self.log_event("🔌 WebSocket kline subscriptions started for all candidates")
+            try:
+                self.bsm.start_kline_socket(self._handle_kline, self.internal_to_binance[symbol], '15m')
+                ws_started += 1
+            except Exception as e:
+                self.log_event(f"⚠️ WS subscribe failed for {self.internal_to_binance[symbol]} (REST fallback): {self._exchange_error(e)}")
+        if ws_started:
+            self.log_event(f"🔌 WebSocket kline subscriptions started for {ws_started} candidates")
+        else:
+            self.log_event("🟡 No WebSocket subscriptions — market data via REST cache only.")
 
         # Turso configuration (cloud SQLite)
         self.turso_url = os.getenv("TURSO_DB_URL")
@@ -325,6 +348,20 @@ class RealExecutionRotatorBot:
             self.logs.pop(0)
         print(log_str)
         logging.info(log_str)
+
+    @staticmethod
+    def _is_ban(e):
+        """True if the error is a Binance DDoS/ban (-1003 / 418 / 429)."""
+        code = getattr(e, 'code', None)
+        status = getattr(e, 'status_code', None)
+        msg = str(e).lower()
+        return (
+            code == -1003
+            or status in (418, 429)
+            or 'way too much request weight' in msg
+            or 'ddos' in msg
+            or 'i\'m a teapot' in msg
+        )
 
     @staticmethod
     def _exchange_error(e):
@@ -577,12 +614,17 @@ class RealExecutionRotatorBot:
             ohlcv = self.klines_cache.get(symbol)
         if ohlcv is None or len(ohlcv) < CANDLE_LIMIT:
             # Fallback to REST if cache insufficient (e.g. initial load)
+            if self._session_banned:
+                return None
             try:
                 ohlcv = self.market_client.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
                 with self._cache_lock:
                     self.klines_cache[symbol] = ohlcv
             except Exception as e:
                 self.log_event(f"Error fetching 15M data untuk {symbol}: {self._exchange_error(e)}")
+                if self._is_ban(e):
+                    self._session_banned = True
+                    self.log_event("⛔ REST ban detected — pausing market data fetches.")
                 return None
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
