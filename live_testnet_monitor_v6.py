@@ -182,21 +182,30 @@ class RealExecutionRotatorBot:
             }
         })
 
+        # Force demo endpoint URLs if ENABLE_DEMO_TRADING=true
+        enable_demo = os.getenv("ENABLE_DEMO_TRADING", "false").lower() == "true"
+        if enable_demo:
+            # Override URLs to demo-fapi.binance.com explicitly
+            self.exchange.urls = {
+                'api': {
+                    'public': 'https://demo-fapi.binance.com/fapi/v1',
+                    'private': 'https://demo-fapi.binance.com/fapi/v1',
+                    'fapiPublic': 'https://demo-fapi.binance.com/fapi/v1',
+                    'fapiPrivate': 'https://demo-fapi.binance.com/fapi/v1',
+                    'fapiPublicV2': 'https://demo-fapi.binance.com/fapi/v2',
+                    'fapiPrivateV2': 'https://demo-fapi.binance.com/fapi/v2'
+                }
+            }
+            self.exchange.sandbox = True
+            self.log_event("🔧 Demo Trading mode ENABLED (demo-fapi.binance.com)")
+        else:
+            self.log_event("🔧 Live Mainnet mode (production)")
+
         # Turso configuration (cloud SQLite)
         self.turso_url = os.getenv("TURSO_DB_URL")
         self.turso_token = os.getenv("TURSO_AUTH_TOKEN")
         self.use_turso = TURSO_AVAILABLE and self.turso_url and self.turso_token
         self.db_conn = None
-
-        # Enable demo trading based on env var (default false = live mainnet)
-        enable_demo = os.getenv("ENABLE_DEMO_TRADING", "false").lower() == "true"
-        if hasattr(self.exchange, 'enable_demo_trading'):
-            self.exchange.enable_demo_trading(enable_demo)
-        else:
-            raise RuntimeError(
-                "Versi ccxt terlalu lama: enable_demo_trading tidak tersedia. "
-                "Upgrade: pip install --upgrade ccxt"
-            )
         
         self.logs = []
         self.positions = {}  # Tracks real active positions
