@@ -183,10 +183,29 @@ class RealExecutionRotatorBot:
             }
         })
 
-        # Force demo endpoint URLs if ENABLE_DEMO_TRADING=true
+        # Determine environment: testnet, demo, or mainnet
+        use_testnet = os.getenv("USE_TESTNET", "false").lower() == "true"
         enable_demo = os.getenv("ENABLE_DEMO_TRADING", "false").lower() == "true"
-        if enable_demo:
-            # Override URLs to demo-fapi.binance.com explicitly
+
+        if use_testnet:
+            # Binance Futures Testnet (official testnet endpoint)
+            self.exchange.urls = {
+                'api': {
+                    'public': 'https://testnet.binancefuture.com/fapi/v1',
+                    'private': 'https://testnet.binancefuture.com/fapi/v1',
+                    'fapiPublic': 'https://testnet.binancefuture.com/fapi/v1',
+                    'fapiPrivate': 'https://testnet.binancefuture.com/fapi/v1',
+                    'fapiPublicV2': 'https://testnet.binancefuture.com/fapi/v2',
+                    'fapiPrivateV2': 'https://testnet.binancefuture.com/fapi/v2',
+                    'fapiPublicV3': 'https://testnet.binancefuture.com/fapi/v3',
+                    'fapiPrivateV3': 'https://testnet.binancefuture.com/fapi/v3'
+                }
+            }
+            self.exchange.baseUrl = 'https://testnet.binancefuture.com/fapi/v1'
+            self.exchange.sandbox = True
+            self.log_event("🔧 Testnet mode ENABLED (testnet.binancefuture.com)")
+        elif enable_demo:
+            # Binance Futures Demo Trading (demo-fapi.binance.com)
             self.exchange.urls = {
                 'api': {
                     'public': 'https://demo-fapi.binance.com/fapi/v1',
