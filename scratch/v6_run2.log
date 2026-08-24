@@ -1,0 +1,71 @@
+nohup: ignoring input
+[2026-08-24 21:52:42] Sistem REAL EXECUTION diinisialisasi pada BINANCE Futures Testnet.
+[2026-08-24 21:52:42] 🗄️ SQLite database siap: C:\Projects\crypto-quant\data\trade_history.db
+
+[INFO] Menjalankan test run loop tunggal (Offline Sandbox)...
+[2026-08-24 21:52:42] 🔍 [SCANNER] Memulai Pemindaian Pasar Harian (Jadwal: Pukul 22:00 WIB)...
+[2026-08-24 21:52:49] Gagal mengatur leverage/margin untuk DOT/USDT:USDT: binanceusdm {"code":-2014,"msg":"API-key format invalid."}
+[2026-08-24 21:52:50] Gagal mengatur leverage/margin untuk LTC/USDT:USDT: binanceusdm {"code":-2014,"msg":"API-key format invalid."}
+[2026-08-24 21:52:50] 🎯 [ROTASI] Koin Terpilih Hari Ini: DOT, LTC
+[2026-08-24 21:52:50] Error fetching balance: binanceusdm {"code":-2014,"msg":"API-key format invalid."}
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                                                                                    │
+│                                                                       CRYPTO QUANT LIVE TRADING MONITOR & ROTATOR (TESTNET)                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                  🔄 ROTASI AKTIF UNTUK 24 JAM:  DOT, LTC  | Scan Harian Berikutnya (Pukul 22:00 WIB): 00j 07m 09d                                                  │
+│                                                                         ⏳ Penyegaran Metrik 15M Berikutnya dalam: 0 detik                                                                         │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────── 📊 15M SCALPING METRICS (LIVE UPDATING) ──────────────────────────────────────┐┌────────────────── 💼 ACTIVE POSITIONS (TESTNET REAL ORDER) ──────────────────┐
+│         ╷          ╷              ╷               ╷                ╷              ╷              ╷                 ││                     ╷                ╷             ╷                         │
+│         │          │              │               │                │              │              │    State /      ││   Asset             │      Side      │         Qty │               P&L (%)   │
+│   Asset │    Price │ Trigger LONG │ Trigger SHORT │ Trend (EMA200) │ ADX (Regime) │ Volume Ratio │    Signal       ││ ╶───────────────────┼────────────────┼─────────────┼───────────────────────╴ │
+│ ╶───────┼──────────┼──────────────┼───────────────┼────────────────┼──────────────┼──────────────┼───────────────╴ ││                     ╵                ╵             ╵                         │
+│   DOT   │  0.91250 │      0.92390 │       0.89520 │    BEARISH     │ 15.8 (CHOP)  │    0.57x     │ WAITING_FOR_…   ││                                                                              │
+│   LTC   │ 52.47000 │     54.05000 │      51.94000 │    BULLISH     │ 14.5 (CHOP)  │    0.59x     │ WAITING_FOR_…   ││                                                                              │
+│         ╵          ╵              ╵               ╵                ╵              ╵              ╵                 ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││                                                                              │
+│                                                                                                                    ││   USDT Testnet Balance: 5000.00 USDT                                         │
+│                                                                                                                    ││   Equity (Margin Sized): 5000.00 USDT                                        │
+│                                                                                                                    ││                                                                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────── 📜 RECENT LOGS ──────────────────────────────────────────────────────────────────────────────────────────┐
+│ [2026-08-24 21:52:42] 🗄️ SQLite database siap: C:\Projects\crypto-quant\data\trade_history.db                                                                                                      │
+│ [2026-08-24 21:52:42] 🔍 [SCANNER] Memulai Pemindaian Pasar Harian (Jadwal: Pukul 22:00 WIB)...                                                                                                    │
+│ [2026-08-24 21:52:49] Gagal mengatur leverage/margin untuk DOT/USDT:USDT: binanceusdm {"code":-2014,"msg":"API-key format invalid."}                                                               │
+│ [2026-08-24 21:52:50] Gagal mengatur leverage/margin untuk LTC/USDT:USDT: binanceusdm {"code":-2014,"msg":"API-key format invalid."}                                                               │
+│ [2026-08-24 21:52:50] 🎯 [ROTASI] Koin Terpilih Hari Ini: DOT, LTC                                                                                                                                 │
+│ [2026-08-24 21:52:50] Error fetching balance: binanceusdm {"code":-2014,"msg":"API-key format invalid."}                                                                                           │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+Success! RealExecutionRotatorBot syntax and modules verified.

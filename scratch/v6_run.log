@@ -1,0 +1,35 @@
+[2026-08-24 21:49:20] Sistem REAL EXECUTION diinisialisasi pada BINANCE Futures Testnet.
+[2026-08-24 21:49:20] 🗄️ SQLite database siap: C:\Projects\crypto-quant\data\trade_history.db
+
+[INFO] Menjalankan test run loop tunggal (Offline Sandbox)...
+[2026-08-24 21:49:20] 🔍 [SCANNER] Memulai Pemindaian Pasar Harian (Jadwal: Pukul 22:00 WIB)...
+[2026-08-24 21:49:28] Gagal mengatur leverage/margin untuk DOT/USDT:USDT: binanceusdm {"code":-2014,"msg":"API-key format invalid."}
+[2026-08-24 21:49:28] Gagal mengatur leverage/margin untuk LTC/USDT:USDT: binanceusdm {"code":-2014,"msg":"API-key format invalid."}
+[2026-08-24 21:49:28] 🎯 [ROTASI] Koin Terpilih Hari Ini: DOT, LTC
+[2026-08-24 21:49:28] Error fetching balance: binanceusdm {"code":-2014,"msg":"API-key format invalid."}
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│            CRYPTO QUANT LIVE TRADING MONITOR & ROTATOR (TESTNET)            │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  🔄 ROTASI AKTIF UNTUK 24 JAM:  DOT, LTC  | Scan Harian Berikutnya (Pukul   │
+│                           22:00 WIB): 00j 10m 31d                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+┌── 📊 15M SCALPING METRICS (LIVE UPDATING) ──┐┌─ 💼 ACTIVE POSITIONS (TESTNE─┐
+│      ╷    ╷    ╷    ╷     ╷    ╷     ╷      ││        ╷      ╷     ╷        │
+│      │    │    │    │     │    │     │ S…   ││        │      │     │  P&L   │
+│      │    │ T… │ T… │ Tr… │ A… │ Vo… │ /    ││                              │
+│   A… │ P… │ L… │ S… │ (E… │ (… │ Ra… │ S…   ││                              │
+│ ╶────┼────┼────┼────┼─────┼────┼─────┼────╴ ││   USDT Testnet Balance:      │
+│   D… │ 0… │ 0… │ 0… │ BE… │ 1… │ 0.… │ W…   ││   5000.00 USDT               │
+│      │    │    │    │     │ (… │     │      ││                              │
+└─────────────────────────────────────────────┘└──────────────────────────────┘
+┌────────────────────────────── 📜 RECENT LOGS ───────────────────────────────┐
+│ [2026-08-24 21:49:20] 🗄️ SQLite database siap:                              │
+│ C:\Projects\crypto-quant\data\trade_history.db                              │
+│ [2026-08-24 21:49:20] 🔍 [SCANNER] Memulai Pemindaian Pasar Harian (Jadwal: │
+│ Pukul 22:00 WIB)...                                                         │
+│ [2026-08-24 21:49:28] Gagal mengatur leverage/margin untuk DOT/USDT:USDT:   │
+│ binanceusdm {"code":-2014,"msg":"API-key format invalid."}                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+Success! RealExecutionRotatorBot syntax and modules verified.

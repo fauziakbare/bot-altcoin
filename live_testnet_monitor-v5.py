@@ -1,0 +1,666 @@
+import os
+import time
+import pandas as pd
+import numpy as np
+import ccxt
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+# Import Rich components for a stunning terminal UI
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich import box
+    from rich.text import Text
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
+# ==========================================
+# CONFIGURATION & CONSTANTS
+# ==========================================
+TIMEFRAME = '15m'
+LEVERAGE = 10
+RISK_REWARD_RATIO = 2.0
+CANDLE_LIMIT = 250  # Enough for 200 EMA and indicators warm-up
+
+# Jaminan Margin per Posisi Transaksi (Sesuai Batas Aman Anda)
+# Total Alokasi Nominal Modal untuk seluruh operasional Bot ini
+TOTAL_BOT_BUDGET = 50.0  # USDT (Total saldo yang didelegasikan ke bot)
+MAX_ACTIVE_COINS = 2
+COLLATERAL_PER_TRADE = TOTAL_BOT_BUDGET / MAX_ACTIVE_COINS  # Margin per trade (25.0 USDT)
+
+# List of 10 candidate assets to scan every 24 hours
+CANDIDATE_ASSETS = [
+    'ADA/USDT:USDT', 'XRP/USDT:USDT', 'SOL/USDT:USDT', 'LTC/USDT:USDT', 
+    'POL/USDT:USDT', 'DOT/USDT:USDT', 'DOGE/USDT:USDT', 'AVAX/USDT:USDT', 
+    'LINK/USDT:USDT', '1000SHIB/USDT:USDT'
+]
+
+# Strategy parameters
+EMA_PERIOD = 200
+DONCHIAN_PERIOD = 20
+ADX_PERIOD = 14
+ATR_PERIOD = 14
+VOL_SMA_PERIOD = 20
+
+# Trading costs simulation (0.05% Taker + 0.02% Slippage per side)
+ROUND_TRIP_FRICTION = 0.0014
+
+# KAPAN SCANNING DIJALANKAN (PILIHAN JAM DALAM WIB)
+# Jam 7 = 07:00 WIB (Daily Close Binance - Rekomendasi Utama EBTA)
+# Jam 22 = 22:00 WIB (2 Jam setelah US Market Open - Rekomendasi Taktis Volatilitas)
+SCHEDULED_SCAN_HOUR = 22  # Ganti ke 22 jika ingin 2 jam setelah bursa US buka
+
+# ==========================================
+# TECHNICAL INDICATORS CALCULATION
+# ==========================================
+def calculate_indicators(df):
+    """
+    Computes EMA200, Donchian Channels, ADX, ATR, and Volume SMA.
+    """
+    # 1. EMA 200
+    df['ema_200'] = df['close'].ewm(span=EMA_PERIOD, adjust=False).mean()
+    
+    # 2. Donchian Channels (shifted by 1 to avoid look-ahead bias)
+    df['donchian_high'] = df['high'].shift(1).rolling(window=DONCHIAN_PERIOD).max()
+    df['donchian_low'] = df['low'].shift(1).rolling(window=DONCHIAN_PERIOD).min()
+    
+    # 3. ATR (Average True Range)
+    high_low = df['high'] - df['low']
+    high_cp = np.abs(df['high'] - df['close'].shift(1))
+    low_cp = np.abs(df['low'] - df['close'].shift(1))
+    df['tr'] = np.max(np.column_stack((high_low, high_cp, low_cp)), axis=1)
+    df['atr'] = df['tr'].ewm(alpha=1/ATR_PERIOD, adjust=False).mean()
+    
+    # 4. Volume SMA
+    df['vol_sma'] = df['volume'].rolling(window=VOL_SMA_PERIOD).mean()
+    
+    # 5. ADX (Average Directional Index)
+    df['up'] = df['high'] - df['high'].shift(1)
+    df['down'] = df['low'] - df['low'].shift(1)
+    
+    df['plus_DM'] = np.where((df['up'] > df['down']) & (df['up'] > 0), df['up'], 0.0)
+    df['minus_DM'] = np.where((df['down'] > df['up']) & (df['down'] > 0), df['down'], 0.0)
+    
+    df['smoothed_tr'] = df['tr'].ewm(alpha=1/ADX_PERIOD, adjust=False).mean()
+    df['smoothed_plus_DM'] = df['plus_DM'].ewm(alpha=1/ADX_PERIOD, adjust=False).mean()
+    df['smoothed_minus_DM'] = df['minus_DM'].ewm(alpha=1/ADX_PERIOD, adjust=False).mean()
+    
+    df['plus_DI'] = 100 * (df['smoothed_plus_DM'] / np.where(df['smoothed_tr'] == 0, 1e-9, df['smoothed_tr']))
+    df['minus_DI'] = 100 * (df['smoothed_minus_DM'] / np.where(df['smoothed_tr'] == 0, 1e-9, df['smoothed_tr']))
+    
+    di_sum = df['plus_DI'] + df['minus_DI']
+    df['dx'] = 100 * (np.abs(df['plus_DI'] - df['minus_DI']) / np.where(di_sum == 0, 1e-9, di_sum))
+    df['adx'] = df['dx'].ewm(alpha=1/ADX_PERIOD, adjust=False).mean()
+    
+    return df
+
+def calculate_daily_metrics(df):
+    """
+    Computes ADX and Volume Ratio on daily (1D) data for filtering.
+    """
+    high_low = df['high'] - df['low']
+    high_cp = np.abs(df['high'] - df['close'].shift(1))
+    low_cp = np.abs(df['low'] - df['close'].shift(1))
+    tr = np.max(np.column_stack((high_low, high_cp, low_cp)), axis=1)
+    
+    # 20-day Volume SMA
+    vol_sma_20 = df['volume'].rolling(window=20).mean()
+    df['vol_ratio'] = df['volume'] / np.where(vol_sma_20 == 0, 1e-9, vol_sma_20)
+    
+    # ADX Calculation
+    up = df['high'] - df['high'].shift(1)
+    down = df['low'] - df['low'].shift(1)
+    
+    plus_DM = np.where((up > down) & (up > 0), up, 0.0)
+    minus_DM = np.where((down > up) & (down > 0), down, 0.0)
+    
+    smoothed_tr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    smoothed_plus_DM = pd.Series(plus_DM).ewm(alpha=1/14, adjust=False).mean()
+    smoothed_minus_DM = pd.Series(minus_DM).ewm(alpha=1/14, adjust=False).mean()
+    
+    plus_DI = 100 * (smoothed_plus_DM / np.where(smoothed_tr == 0, 1e-9, smoothed_tr))
+    minus_DI = 100 * (smoothed_minus_DM / np.where(smoothed_tr == 0, 1e-9, smoothed_tr))
+    
+    di_sum = plus_DI + minus_DI
+    dx = 100 * (np.abs(plus_DI - minus_DI) / np.where(di_sum == 0, 1e-9, di_sum))
+    df['adx_1d'] = dx.ewm(alpha=1/14, adjust=False).mean()
+    
+    return df
+
+# ==========================================
+# ROTATOR REAL EXECUTION BOT (TESTNET Sandbox)
+# ==========================================
+class RealExecutionRotatorBot:
+    def __init__(self, api_key, api_secret, use_render_mode=False):
+        self.use_render_mode = use_render_mode
+        self.console = Console() if RICH_AVAILABLE else None
+        
+        # Connect to Binance Futures USD-M Demo Trading
+        # NOTE: Binance Futures TESTNET/sandbox sudah di-deprecate.
+        # Pengganti: Demo Trading (endpoint demo-fapi.binance.com).
+        # Butuh API Key/Secret Demo Trading, bukan key testnet lama.
+        # Buat key di binance.com -> Futures -> Demo Trading.
+        self.exchange = ccxt.binanceusdm({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'future',
+                'adjustForTimeDifference': True
+            }
+        })
+
+        if hasattr(self.exchange, 'enable_demo_trading'):
+            self.exchange.enable_demo_trading(True)
+        else:
+            raise RuntimeError(
+                "Versi ccxt terlalu lama: enable_demo_trading tidak tersedia. "
+                "Upgrade: pip install --upgrade ccxt"
+            )
+        
+        self.logs = []
+        self.positions = {}  # Tracks real active positions
+        self.active_assets = []  # Curated koin to trade
+        self.scanner_results = {} 
+        self.last_scan_time = None
+        self.next_scan_time = None
+        
+        # Live 15-second refresh countdown trackers
+        self.seconds_until_refresh = 0  # Force immediate refresh on start
+        
+        self.log_event("Sistem REAL EXECUTION diinisialisasi pada BINANCE Futures Testnet.")
+        if self.use_render_mode:
+            self.log_event("RENDER MODE AKTIF: Dashboard visual terminal dinonaktifkan.")
+
+    def log_event(self, message):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_str = f"[{timestamp}] {message}"
+        self.logs.append(log_str)
+        if len(self.logs) > 30:
+            self.logs.pop(0)
+        print(log_str)
+
+    def calculate_next_scan_time(self):
+        """
+        Calculates the exact datetime for the next scheduled daily scan.
+        """
+        now = datetime.now()
+        # Scheduled time for today
+        scheduled_today = now.replace(hour=SCHEDULED_SCAN_HOUR, minute=0, second=0, microsecond=0)
+        
+        if now < scheduled_today:
+            return scheduled_today
+        else:
+            # If scheduled time has already passed today, schedule for tomorrow
+            return scheduled_today + timedelta(days=1)
+
+    def scan_daily_market(self):
+        """
+        Scans all CANDIDATE_ASSETS once daily at the scheduled hour.
+        Selects Top 2 with Daily ADX >= 25 and Volume Ratio > 1.5.
+        Falls back to ADA and XRP if criteria aren't met.
+        """
+        self.log_event(f"🔍 [SCANNER] Memulai Pemindaian Pasar Harian (Jadwal: Pukul {SCHEDULED_SCAN_HOUR:02d}:00 WIB)...")
+        candidates_stats = []
+        
+        for symbol in CANDIDATE_ASSETS:
+            try:
+                # Fetch last 35 daily candles to compute indicators
+                ohlcv = self.exchange.fetch_ohlcv(symbol, '1d', limit=35)
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df = calculate_daily_metrics(df)
+                
+                last_row = df.iloc[-1]
+                daily_adx = last_row['adx_1d']
+                daily_vol_ratio = last_row['vol_ratio']
+                
+                # Check if asset meets trend criteria
+                qualifies = (daily_adx >= 25) and (daily_vol_ratio > 1.5)
+                candidates_stats.append({
+                    'symbol': symbol,
+                    'adx': daily_adx,
+                    'vol_ratio': daily_vol_ratio,
+                    'qualifies': qualifies,
+                    'rank_score': daily_adx * daily_vol_ratio if qualifies else -1
+                })
+                
+                # Sleep delay to respect API limit
+                time.sleep(0.5)
+                
+            except Exception as e:
+                self.log_event(f"Gagal memindai data harian untuk {symbol}: {str(e)}")
+                
+        # Sort candidates
+        candidates_stats.sort(key=lambda x: x['rank_score'], reverse=True)
+        self.scanner_results = {c['symbol']: c for c in candidates_stats}
+        
+        # Select top 2 qualifying assets
+        selected = [c['symbol'] for c in candidates_stats if c['qualifies']][:2]
+        
+        # Fallback if less than 2 qualify
+        fallback_used = False
+        if len(selected) < 2:
+            fallback_used = True
+            for fallback in ['ADA/USDT:USDT', 'XRP/USDT:USDT']:
+                if fallback not in selected:
+                    selected.append(fallback)
+            selected = selected[:2]
+            
+        self.active_assets = selected
+        self.last_scan_time = datetime.now()
+        self.next_scan_time = self.calculate_next_scan_time()
+        
+        # Setup margin mode and leverage for new selected assets on Binance
+        for symbol in self.active_assets:
+            self.setup_leverage_and_margin(symbol)
+            
+        status_msg = f"🎯 [ROTASI] Koin Terpilih Hari Ini: {', '.join([s.split('/')[0] for s in selected])}"
+        if fallback_used:
+            status_msg += " (Kombinasi Fallback diaktifkan)"
+        self.log_event(status_msg)
+
+    def setup_leverage_and_margin(self, symbol):
+        """
+        Configures Isolated Margin and 10x Leverage on Binance Testnet for the asset.
+        """
+        try:
+            # Set isolated margin mode
+            try:
+                self.exchange.set_margin_mode('ISOLATED', symbol)
+                self.log_event(f"⚙️ {symbol.split('/')[0]} disetel ke ISOLATED margin mode.")
+            except Exception:
+                pass  # Ignore if already set to isolated
+                
+            # Set leverage to 10x
+            self.exchange.set_leverage(LEVERAGE, symbol)
+            self.log_event(f"⚙️ {symbol.split('/')[0]} disetel ke Leverage {LEVERAGE}x.")
+        except Exception as e:
+            self.log_event(f"Gagal mengatur leverage/margin untuk {symbol}: {str(e)}")
+
+    def fetch_market_data(self, symbol):
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return calculate_indicators(df)
+        except Exception as e:
+            self.log_event(f"Error fetching 15M data untuk {symbol}: {str(e)}")
+            return None
+
+    def check_signals(self, symbol, df):
+        if df is None or len(df) < CANDLE_LIMIT:
+            return "WAITING_FOR_DATA"
+
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+        
+        current_price = last_row['close']
+        ema = last_row['ema_200']
+        donchian_high = last_row['donchian_high']
+        donchian_low = last_row['donchian_low']
+        adx = last_row['adx']
+        volume = last_row['volume']
+        vol_sma = last_row['vol_sma']
+        atr = last_row['atr']
+
+        trend_bullish = current_price > ema
+        trend_bearish = current_price < ema
+        adx_active = adx >= 25
+        volume_confirmed = volume > (1.5 * vol_sma)
+        
+        breakout_above = prev_row['close'] <= prev_row['donchian_high'] and current_price > donchian_high
+        breakout_below = prev_row['close'] >= prev_row['donchian_low'] and current_price < donchian_low
+
+        # Active Position Exit Checks
+        if symbol in self.positions:
+            pos = self.positions[symbol]
+            if pos['type'] == 'LONG':
+                if current_price > pos['peak_price']:
+                    self.positions[symbol]['peak_price'] = current_price
+                trailing_sl = self.positions[symbol]['peak_price'] - (2.5 * atr)
+                
+                if current_price <= trailing_sl:
+                    self.close_position(symbol, current_price, "TRAILING_STOP_HIT (ATR)")
+                elif current_price >= pos['tp']:
+                    self.close_position(symbol, current_price, "TAKE_PROFIT_HIT (5.0x ATR)")
+                elif not adx_active:  # Tri-State ADX Exit
+                    self.close_position(symbol, current_price, "REGIME_EXIT_ADX_LOW (<25)")
+            
+            elif pos['type'] == 'SHORT':
+                if current_price < pos['peak_price']:
+                    self.positions[symbol]['peak_price'] = current_price
+                trailing_sl = self.positions[symbol]['peak_price'] + (2.5 * atr)
+                
+                if current_price >= trailing_sl:
+                    self.close_position(symbol, current_price, "TRAILING_STOP_HIT (ATR)")
+                elif current_price <= pos['tp']:
+                    self.close_position(symbol, current_price, "TAKE_PROFIT_HIT (5.0x ATR)")
+                elif not adx_active:  # Tri-State ADX Exit
+                    self.close_position(symbol, current_price, "REGIME_EXIT_ADX_LOW (<25)")
+            
+            return "HOLDING"
+
+        # New Position Entry Checks
+        if trend_bullish and breakout_above and adx_active and volume_confirmed:
+            self.open_position(symbol, 'LONG', current_price, atr)
+            return "BUY_SIGNAL"
+        elif trend_bearish and breakout_below and adx_active and volume_confirmed:
+            self.open_position(symbol, 'SHORT', current_price, atr)
+            return "SELL_SIGNAL"
+
+        return "WAITING_FOR_BREAKOUT"
+
+    def open_position(self, symbol, side, entry_price, atr):
+        """
+        Executes a real MARKET order on Binance USD-M Testnet using COLLATERAL_PER_TRADE = 50 USDT.
+        """
+        try:
+            # 1. Calculate actual size based on 50 USDT collateral & 10x leverage = 500 USDT notional
+            notional_value = COLLATERAL_PER_TRADE * LEVERAGE
+            quantity = notional_value / entry_price
+            
+            # Format quantity to match Binance lot step size rules
+            # We fetch precision rules from the symbol info dynamically
+            market_info = self.exchange.market(symbol)
+            precision = market_info['precision']['amount']
+            quantity = self.exchange.amount_to_precision(symbol, quantity)
+            quantity = float(quantity)
+            
+            self.log_event(f"🛒 [TESTNET] Mengirim market order {side} {symbol} sebanyak {quantity} unit (Margin: {COLLATERAL_PER_TRADE} USDT)...")
+            
+            # 2. Execute Market Order on Binance
+            order_side = 'buy' if side == 'LONG' else 'sell'
+            response = self.exchange.create_market_order(symbol, order_side, quantity)
+            executed_price = response.get('price', entry_price)
+            
+            # Calculate SL and TP levels
+            sl_distance = 2.5 * atr
+            tp_distance = 5.0 * atr
+            sl = executed_price - sl_distance if side == 'LONG' else executed_price + sl_distance
+            tp = executed_price + tp_distance if side == 'LONG' else executed_price - tp_distance
+            
+            self.positions[symbol] = {
+                'type': side,
+                'entry_price': executed_price,
+                'peak_price': executed_price,
+                'sl': sl,
+                'tp': tp,
+                'quantity': quantity,
+                'entry_time': datetime.now().strftime("%H:%M:%S")
+            }
+            
+            self.log_event(f"🚀 POSISI TERBUKA: {side} {symbol} @ {executed_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Qty: {quantity}")
+            
+        except Exception as e:
+            self.log_event(f"❌ GAGAL MEMBUKA POSISI untuk {symbol}: {str(e)}")
+
+    def close_position(self, symbol, exit_price, reason):
+        """
+        Executes a real MARKET close order with reduceOnly=True on Binance USD-M Testnet.
+        """
+        try:
+            pos = self.positions[symbol]
+            side = pos['type']
+            quantity = pos['quantity']
+            entry = pos['entry_price']
+            
+            self.log_event(f"🛒 [TESTNET] Menutup posisi {side} {symbol} sebanyak {quantity} unit karena {reason}...")
+            
+            # Execute closing market order (opposite direction, reduceOnly=True)
+            close_side = 'sell' if side == 'LONG' else 'buy'
+            response = self.exchange.create_market_order(symbol, close_side, quantity, params={'reduceOnly': True})
+            executed_price = response.get('price', exit_price)
+            
+            # Calculate returns
+            if side == 'LONG':
+                raw_ret = (executed_price - entry) / entry
+            else:
+                raw_ret = (entry - executed_price) / entry
+                
+            net_ret = (raw_ret * LEVERAGE) - (ROUND_TRIP_FRICTION * LEVERAGE)
+            
+            self.log_event(f"🏁 POSISI TERTUTUP: {side} {symbol} @ {executed_price:.5f} | Net Return: {net_ret*100:+.2f}% (Friction Applied)")
+            del self.positions[symbol]
+            
+        except Exception as e:
+            self.log_event(f"❌ GAGAL MENUTUP POSISI untuk {symbol}: {str(e)}")
+
+    def render_dashboard(self, markets_state, balance_info):
+        """
+        Creates a gorgeous terminal UI using Rich, showing live countdowns.
+        """
+        if not RICH_AVAILABLE or self.use_render_mode:
+            return
+
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=4),
+            Layout(name="rotation_info", size=4),
+            Layout(name="body", ratio=1),
+            Layout(name="logs", size=8)
+        )
+        
+        # 1. Header
+        header_text = Text("\nCRYPTO QUANT LIVE TRADING MONITOR & ROTATOR (TESTNET)", style="bold green", justify="center")
+        header_text.append(f"\nAPI: CONNECTED | Sandbox: REAL EXECUTION | Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", style="dim white")
+        layout["header"].update(Panel(header_text, style="green"))
+
+        # 2. Daily Rotation Panel with countdown
+        time_left = self.next_scan_time - datetime.now() if self.next_scan_time else timedelta(0)
+        hours, remainder = divmod(int(time_left.total_seconds()), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        countdown_str = f"{hours:02d}j {minutes:02d}m {seconds:02d}d"
+        
+        rotation_text = Text(justify="center")
+        rotation_text.append("🔄 ROTASI AKTIF UNTUK 24 JAM: ", style="bold white")
+        rotation_text.append(f" {', '.join([s.split('/')[0] for s in self.active_assets])} ", style="bold yellow")
+        rotation_text.append(f" | Scan Harian Berikutnya (Pukul {SCHEDULED_SCAN_HOUR:02d}:00 WIB): ", style="white")
+        rotation_text.append(countdown_str, style="bold red")
+        
+        # Live 15-second refresh countdown
+        rotation_text.append(f"\n⏳ Penyegaran Metrik 15M Berikutnya dalam: ", style="dim gray")
+        rotation_text.append(f"{self.seconds_until_refresh} detik", style="bold cyan")
+        
+        layout["rotation_info"].update(Panel(rotation_text, style="yellow", box=box.ROUNDED))
+
+        # 3. Body Split (Market table & Active Positions)
+        body_layout = Layout()
+        body_layout.split_row(
+            Layout(name="markets", ratio=3),
+            Layout(name="positions", ratio=2)
+        )
+        layout["body"].update(body_layout)
+
+        # 3a. Market State Table
+        market_table = Table(box=box.MINIMAL, expand=True)
+        market_table.add_column("Asset", style="cyan")
+        market_table.add_column("Price", justify="right")
+        market_table.add_column("Trend (EMA200)", justify="center")
+        market_table.add_column("ADX (Regime)", justify="center")
+        market_table.add_column("Volume Ratio", justify="center")
+        market_table.add_column("State / Signal", justify="center")
+
+        for symbol in self.active_assets:
+            if symbol in markets_state:
+                state = markets_state[symbol]
+                price_str = f"{state['price']:.5f}"
+                ema_str = "[green]BULLISH[/green]" if state['trend'] == 'BULLISH' else "[red]BEARISH[/red]"
+                
+                adx_val = state['adx']
+                adx_color = "green" if adx_val >= 25 else "red"
+                adx_str = f"[{adx_color}]{adx_val:.1f} ({'TREND' if adx_val >= 25 else 'CHOP'})[/{adx_color}]"
+                
+                vol_ratio = state['vol_ratio']
+                vol_color = "green" if vol_ratio >= 1.5 else "white"
+                vol_str = f"[{vol_color}]{vol_ratio:.2f}x[/{vol_color}]"
+                
+                sig_str = state['signal']
+                if "BUY" in sig_str or "SELL" in sig_str:
+                    sig_str = f"[bold green]{sig_str}[/bold green]"
+                elif "HOLDING" in sig_str:
+                    sig_str = f"[yellow]{sig_str}[/yellow]"
+            else:
+                price_str = "0.00000"
+                ema_str = "UNKNOWN"
+                adx_str = "0.0"
+                vol_str = "0.00"
+                sig_str = "FETCHING..."
+                
+            market_table.add_row(symbol.split('/')[0], price_str, ema_str, adx_str, vol_str, sig_str)
+
+        body_layout["markets"].update(Panel(market_table, title="📊 15M SCALPING METRICS (LIVE UPDATING)", box=box.ROUNDED))
+
+        # 3b. Active Positions & Balance Panel
+        pos_table = Table(box=box.MINIMAL, expand=True)
+        pos_table.add_column("Asset", style="cyan")
+        pos_table.add_column("Side", justify="center")
+        pos_table.add_column("Qty", justify="right")
+        pos_table.add_column("P&L (%)", justify="right")
+
+        for symbol, pos in self.positions.items():
+            curr_price = markets_state[symbol]['price'] if symbol in markets_state else pos['entry_price']
+            entry = pos['entry_price']
+            side = pos['type']
+            qty = pos['quantity']
+            
+            if side == 'LONG':
+                raw_pnl = (curr_price - entry) / entry
+            else:
+                raw_pnl = (entry - curr_price) / entry
+                
+            leveraged_pnl = raw_pnl * LEVERAGE * 100
+            pnl_color = "green" if leveraged_pnl >= 0 else "red"
+            pnl_str = f"[{pnl_color}]{leveraged_pnl:+.2f}%[/{pnl_color}]"
+            
+            pos_table.add_row(symbol.split('/')[0], f"[bold {'green' if side == 'LONG' else 'red'}]{side}[/bold]", f"{qty}", pnl_str)
+
+        balance_text = f"\n[bold white]USDT Testnet Balance:[/bold white] [green]{balance_info['free']:.2f} USDT[/green]\n"
+        balance_text += f"[bold white]Equity (Margin Sized):[/bold white] [green]{balance_info['total']:.2f} USDT[/green]\n"
+        balance_text += f"[bold dim white]Collateral Limit Per Trade:[/bold dim white] [cyan]{COLLATERAL_PER_TRADE} USDT[/cyan]"
+        
+        pos_panel_content = Layout()
+        pos_panel_content.split_column(
+            Layout(pos_table, ratio=1),
+            Layout(Panel(balance_text, style="dim white", box=box.SIMPLE), size=5)
+        )
+
+        body_layout["positions"].update(Panel(pos_panel_content, title="💼 ACTIVE POSITIONS (TESTNET REAL ORDER)", box=box.ROUNDED))
+
+        # 4. Log History Panel
+        log_content = "\n".join(self.logs[-6:])
+        layout["logs"].update(Panel(log_content, title="📜 RECENT LOGS", box=box.ROUNDED, style="dim white"))
+
+        self.console.print(layout)
+
+    def run_one_loop(self):
+        # 1. Trigger scheduled daily coin rotation scan
+        if self.last_scan_time is None or datetime.now() >= self.next_scan_time:
+            self.scan_daily_market()
+            
+        markets_state = {}
+        try:
+            balance = self.exchange.fetch_balance()
+            usdt_free = balance['free'].get('USDT', 5000.0)
+            usdt_total = balance['total'].get('USDT', 5000.0)
+            balance_info = {'free': usdt_free, 'total': usdt_total}
+        except Exception as e:
+            self.log_event(f"Error fetching balance: {str(e)}")
+            balance_info = {'free': 5000.0, 'total': 5000.0}
+
+        for symbol in self.active_assets:
+            df = self.fetch_market_data(symbol)
+            if df is not None:
+                last_row = df.iloc[-1]
+                signal = self.check_signals(symbol, df)
+                
+                vol_sma = last_row['vol_sma']
+                markets_state[symbol] = {
+                    'price': last_row['close'],
+                    'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
+                    'adx': last_row['adx'],
+                    'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
+                    'signal': signal
+                }
+            else:
+                markets_state[symbol] = {
+                    'price': 0.0,
+                    'trend': 'UNKNOWN',
+                    'adx': 0.0,
+                    'vol_ratio': 1.0,
+                    'signal': 'ERROR_DATA'
+                }
+
+        self.render_dashboard(markets_state, balance_info)
+
+# ==========================================
+# MAIN RUNNER WITH LIVE TICKING SECONDS
+# ==========================================
+if __name__ == "__main__":
+    load_dotenv()  # wajib: ambil BINANCE_API_KEY/SECRET dari .env
+    API_KEY = os.getenv("BINANCE_API_KEY", "your_testnet_api_key")
+    API_SECRET = os.getenv("BINANCE_API_SECRET", "your_testnet_api_secret")
+    IS_RENDER = os.getenv("RENDER", "false").lower() == "true"
+    
+    bot = RealExecutionRotatorBot(api_key=API_KEY, api_secret=API_SECRET, use_render_mode=IS_RENDER)
+    
+    # Offline sandbox check
+    if os.getenv("SANDBOX_TEST", "false") == "true" or (API_KEY == "your_testnet_api_key"):
+        print("\n[INFO] Menjalankan test run loop tunggal (Offline Sandbox)...")
+        bot.run_one_loop()
+        print("Success! RealExecutionRotatorBot syntax and modules verified.")
+    else:
+        # Live 1-second interval execution loop
+        try:
+            bot.seconds_until_refresh = 0  # Force fetch on first run
+            markets_state = {}
+            balance_info = {'free': 5000.0, 'total': 5000.0}
+            
+            while True:
+                # Every 15 seconds, we fetch market data and check signals
+                if bot.seconds_until_refresh <= 0:
+                    try:
+                        # Update Daily Scan scheduled times
+                        if bot.last_scan_time is None or datetime.now() >= bot.next_scan_time:
+                            bot.scan_daily_market()
+                            
+                        # Fetch balance and market data
+                        balance = bot.exchange.fetch_balance()
+                        usdt_free = balance['free'].get('USDT', 5000.0)
+                        usdt_total = balance['total'].get('USDT', 5000.0)
+                        balance_info = {'free': usdt_free, 'total': usdt_total}
+                        
+                        for symbol in bot.active_assets:
+                            df = bot.fetch_market_data(symbol)
+                            if df is not None:
+                                last_row = df.iloc[-1]
+                                signal = bot.check_signals(symbol, df)
+                                vol_sma = last_row['vol_sma']
+                                markets_state[symbol] = {
+                                    'price': last_row['close'],
+                                    'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
+                                    'adx': last_row['adx'],
+                                    'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
+                                    'signal': signal
+                                }
+                    except Exception as e:
+                        bot.log_event(f"Error in market tick: {str(e)}")
+                    
+                    # Reset counter to 15 seconds
+                    bot.seconds_until_refresh = 15
+                
+                # Render the dashboard EVERY second to show countdowns ticking
+                bot.render_dashboard(markets_state, balance_info)
+                
+                # Wait exactly 1 second
+                time.sleep(1)
+                bot.seconds_until_refresh -= 1
+                
+        except KeyboardInterrupt:
+            print("\nExiting Live Monitor gracefully...")
