@@ -108,7 +108,36 @@ def bot_worker():
 @requires_auth
 def index():
     status = "running" if bot_running else "stopped"
-    return f"Bot status: {status}\nActive assets: {bot.active_assets if bot else 'None'}\nLast scan: {bot.last_scan_time if bot else 'Never'}"
+    assets = ', '.join(bot.active_assets) if bot and bot.active_assets else 'None'
+    last_scan = bot.last_scan_time.strftime('%Y-%m-%d %H:%M:%S') if bot and bot.last_scan_time else 'Never'
+    positions = len(bot.positions) if bot else 0
+    return f"""
+    <html>
+        <head><title>Bot Status</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+            .card {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; }}
+            h1 {{ color: #333; }}
+            .status {{ font-weight: bold; }}
+            .ok {{ color: green; }}
+            .stop {{ color: red; }}
+            .info {{ margin: 10px 0; }}
+        </style>
+        </head>
+        <body>
+        <div class="card">
+            <h1>🤖 Trading Bot Status</h1>
+            <div class="info"><span class="status">Status:</span> <span class="{ 'ok' if status == 'running' else 'stop' }">{status.upper()}</span></div>
+            <div class="info"><span class="status">Active assets:</span> {assets}</div>
+            <div class="info"><span class="status">Last scan:</span> {last_scan}</div>
+            <div class="info"><span class="status">Open positions:</span> {positions}</div>
+            <div class="info"><span class="status">Bot worker:</span> {'Active' if bot_running else 'Stopped'}</div>
+            <hr>
+            <div class="info">📊 <a href="/status">JSON status</a> &nbsp;|&nbsp; 🏓 <a href="/ping">Health check</a></div>
+        </div>
+        </body>
+    </html>
+    """
 
 @app.route('/ping')
 def ping():
