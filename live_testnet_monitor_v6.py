@@ -267,7 +267,13 @@ class RealExecutionRotatorBot:
             self.trade_client = None
             self.log_event(f"❌ Gagal inisialisasi trade_client: {self._exchange_error(e)}")
 
-        # WebSocket for market data (to avoid REST rate limits)
+        # [DIAG] signed host used for balance/orders (must be demo-fapi)
+        print(f"[DIAG] fapiPrivate    = {self.trade_client.urls['api'].get('fapiPrivate', '?')}")
+        try:
+            self.trade_client.fetch_balance()
+            print("[DIAG] balance OK")
+        except Exception as ex:
+            print(f"[DIAG] balance FAIL: {ex}")
         self._session_banned = False
         self.bsm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
         try:
