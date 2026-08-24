@@ -917,20 +917,20 @@ if __name__ == "__main__":
                                     'trigger_long': last_row['donchian_high'],
                                     'trigger_short': last_row['donchian_low']
                                 }
-                except Exception as e:
-                    bot.log_event(f"Error in market tick: {bot._exchange_error(e)}")
-                    # Back off on error to avoid hammering API
-                    bot.seconds_until_refresh = 60
-                
-                # Reset counter to 30 seconds to reduce rate limit pressure
-                bot.seconds_until_refresh = 30
-                
-                # Render the dashboard EVERY second to show countdowns ticking
-                bot.render_dashboard(markets_state, balance_info)
-                
-                # Wait exactly 1 second
-                time.sleep(1)
-                bot.seconds_until_refresh -= 1
+                    except Exception as e:
+                        bot.log_event(f"Error in market tick: {bot._exchange_error(e)}")
+                        # Back off on error to avoid hammering API
+                        bot.seconds_until_refresh = 60
+                    
+                    # Reset counter to 30 seconds to reduce rate limit pressure
+                    bot.seconds_until_refresh = 30
+                    
+                    # Render the dashboard EVERY second to show countdowns ticking
+                    bot.render_dashboard(markets_state, balance_info)
+                    
+                    # Wait exactly 1 second
+                    time.sleep(1)
+                    bot.seconds_until_refresh -= 1
                 
         except KeyboardInterrupt:
             print("\nExiting Live Monitor gracefully...")
