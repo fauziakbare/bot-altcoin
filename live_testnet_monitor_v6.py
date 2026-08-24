@@ -290,7 +290,7 @@ class RealExecutionRotatorBot:
             self.internal_to_binance[sym] = binance_sym
         # Subscribe to 15m klines for all candidates
         for symbol in CANDIDATE_ASSETS:
-            self.bsm.start_kline_socket(self.internal_to_binance[symbol], self._handle_kline, '15m')
+            self.bsm.start_kline_socket(self._handle_kline, self.internal_to_binance[symbol], '15m')
         self.log_event("🔌 WebSocket kline subscriptions started for all candidates")
 
         # Turso configuration (cloud SQLite)
@@ -529,8 +529,11 @@ class RealExecutionRotatorBot:
                 self.trade_client.set_margin_mode('ISOLATED', symbol)
                 self.log_event(f"⚙️ {symbol.split('/')[0]} disetel ke ISOLATED margin mode.")
             except Exception as e:
-                # Ignore only the "already isolated" case; log other errors.
-                self.log_event(f"⚙️ Margin mode ISOLATED sudah/error untuk {symbol}: {self._exchange_error(e)}")
+                err = self._exchange_error(e)
+                if "No need to change margin type" in err or "-4046" in err:
+                    self.log_event(f"⚙️ {symbol.split('/')[0]} sudah ISOLATED margin mode.")
+                else:
+                    self.log_event(f"❌ Margin mode ISOLATED gagal untuk {symbol}: {err}")
                 
             # Set leverage to 10x
             try:
