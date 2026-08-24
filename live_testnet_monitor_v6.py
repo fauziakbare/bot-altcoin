@@ -3,12 +3,14 @@ import time
 import sys
 import sqlite3
 import logging
+import threading
 import pandas as pd
 import numpy as np
 import ccxt
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from contextlib import closing
+from binance import ThreadedWebsocketManager
 
 # Turso (SQLite-compatible cloud DB) - fallback if not available
 try:
@@ -265,6 +267,32 @@ class RealExecutionRotatorBot:
             self.trade_client = None
             self.log_event(f"❌ Gagal inisialisasi trade_client: {self._exchange_error(e)}")
 
+        # WebSocket for market data (to avoid REST rate limits)
+        self.bsm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
+        self.bsm.start()
+        self.klines_cache = {}  # symbol -> list of klines (OHLCV)
+        self._cache_lock = threading.Lock()
+        # Pre-fetch initial 250 candles for each candidate via REST
+        for symbol in CANDIDATE_ASSETS:
+            try:
+                ohlcv = self.market_client.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
+                with self._cache_lock:
+                    self.klines_cache[symbol] = ohlcv
+                self.log_event(f"📡 Pre-fetched {CANDLE_LIMIT} candles for {symbol}")
+            except Exception as e:
+                self.log_event(f"❌ Pre-fetch failed for {symbol}: {self._exchange_error(e)}")
+        # Build symbol mappings for WebSocket
+        self.binance_to_internal = {}
+        self.internal_to_binance = {}
+        for sym in CANDIDATE_ASSETS:
+            binance_sym = sym.split('/')[0] + 'USDT'
+            self.binance_to_internal[binance_sym] = sym
+            self.internal_to_binance[sym] = binance_sym
+        # Subscribe to 15m klines for all candidates
+        for symbol in CANDIDATE_ASSETS:
+            self.bsm.start_kline_socket(self.internal_to_binance[symbol], callback=self._handle_kline, interval='15m')
+        self.log_event("🔌 WebSocket kline subscriptions started for all candidates")
+
         # Turso configuration (cloud SQLite)
         self.turso_url = os.getenv("TURSO_DB_URL")
         self.turso_token = os.getenv("TURSO_AUTH_TOKEN")
@@ -513,15 +541,49 @@ class RealExecutionRotatorBot:
         except Exception as e:
             self.log_event(f"Gagal mengatur leverage/margin untuk {symbol}: {self._exchange_error(e)}")
 
-    def fetch_market_data(self, symbol):
+    def _handle_kline(self, data):
+        """Callback for WebSocket kline updates."""
         try:
-            ohlcv = self.market_client.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return calculate_indicators(df)
+            kline = data['k']
+            symbol = data['s']  # Binance symbol e.g. BTCUSDT
+            if symbol not in self.binance_to_internal:
+                return
+            internal_symbol = self.binance_to_internal[symbol]
+            timestamp = kline['t']
+            open_price = float(kline['o'])
+            high_price = float(kline['h'])
+            low_price = float(kline['l'])
+            close_price = float(kline['c'])
+            volume = float(kline['v'])
+            new_candle = [timestamp, open_price, high_price, low_price, close_price, volume]
+            with self._cache_lock:
+                cache = self.klines_cache.get(internal_symbol, [])
+                if cache and cache[-1][0] == timestamp:
+                    cache[-1] = new_candle
+                else:
+                    cache.append(new_candle)
+                    if len(cache) > CANDLE_LIMIT:
+                        cache.pop(0)
+                self.klines_cache[internal_symbol] = cache
         except Exception as e:
-            self.log_event(f"Error fetching 15M data untuk {symbol}: {self._exchange_error(e)}")
-            return None
+            self.log_event(f"WebSocket kline error: {self._exchange_error(e)}")
+
+    def fetch_market_data(self, symbol):
+        # Read from cache (updated via WebSocket) instead of REST
+        with self._cache_lock:
+            ohlcv = self.klines_cache.get(symbol)
+        if ohlcv is None or len(ohlcv) < CANDLE_LIMIT:
+            # Fallback to REST if cache insufficient (e.g. initial load)
+            try:
+                ohlcv = self.market_client.fetch_ohlcv(symbol, TIMEFRAME, limit=CANDLE_LIMIT)
+                with self._cache_lock:
+                    self.klines_cache[symbol] = ohlcv
+            except Exception as e:
+                self.log_event(f"Error fetching 15M data untuk {symbol}: {self._exchange_error(e)}")
+                return None
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+        return calculate_indicators(df)
 
     def check_signals(self, symbol, df):
         if df is None or len(df) < CANDLE_LIMIT:
