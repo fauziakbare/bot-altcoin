@@ -290,7 +290,7 @@ class RealExecutionRotatorBot:
             self.internal_to_binance[sym] = binance_sym
         # Subscribe to 15m klines for all candidates
         for symbol in CANDIDATE_ASSETS:
-            self.bsm.start_kline_socket(self.internal_to_binance[symbol], callback=self._handle_kline, interval='15m')
+            self.bsm.start_kline_socket(self.internal_to_binance[symbol], self._handle_kline, interval='15m')
         self.log_event("🔌 WebSocket kline subscriptions started for all candidates")
 
         # Turso configuration (cloud SQLite)
@@ -923,13 +923,17 @@ class RealExecutionRotatorBot:
 if __name__ == "__main__":
     load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))  # wajib: ambil BINANCE_API_KEY/SECRET dari .env
 
-    # Setup logging
+    # Setup logging with UTF-8 encoding to handle emojis
     os.makedirs('logs', exist_ok=True)
+    import sys
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(message)s',
                         handlers=[
-                            logging.FileHandler('logs/bot.log'),
-                            logging.StreamHandler()
+                            logging.FileHandler('logs/bot.log', encoding='utf-8'),
+                            logging.StreamHandler(sys.stdout)
                         ])
 
     API_KEY = os.getenv("BINANCE_API_KEY", "your_testnet_api_key")
