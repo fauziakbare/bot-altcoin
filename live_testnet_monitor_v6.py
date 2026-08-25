@@ -347,6 +347,8 @@ class RealExecutionRotatorBot:
         self.scanner_results = {} 
         self.last_scan_time = None
         self.next_scan_time = None
+        self.markets_state = {}
+        self.balance_info = {'free': 0.0, 'total': 0.0}
         
         # Live 15-second refresh countdown trackers
         self.seconds_until_refresh = 0  # Force immediate refresh on start
