@@ -191,6 +191,20 @@ class RealExecutionRotatorBot:
             },
         })
 
+        # OPTIONAL: route all PUBLIC market-data REST calls through a
+        # Cloudflare Worker relay to escape Render's shared-IP Binance ban.
+        # Set MARKET_RELAY_URL (no trailing slash) e.g. https://your-worker.workers.dev
+        # Only 'fapiPublic'/'fapiData' are overridden: those host the klines,
+        # OI and funding endpoints this bot actually calls. Public API-key-less,
+        # so the relay needs no auth and Binance sees the Worker's IP edge.
+        relay_url = (os.getenv("MARKET_RELAY_URL") or "").strip().rstrip("/")
+        if relay_url:
+            _api = self.market_client.urls['api']
+            _api['fapiPublic'] = relay_url
+            _api['fapiData'] = relay_url
+            self.log_event(f"🔁 MARKET RELAY enabled: {relay_url}")
+            print(f"[RELAY] market_client fapiPublic -> {relay_url}")
+
         # Determine environment: testnet (legacy), demo, or mainnet
         use_testnet = os.getenv("USE_TESTNET", "false").lower() == "true"
         enable_demo = os.getenv("ENABLE_DEMO_TRADING", "false").lower() == "true"
@@ -964,7 +978,9 @@ class RealExecutionRotatorBot:
                         'trend': 'UNKNOWN',
                         'adx': 0.0,
                         'vol_ratio': 1.0,
-                        'signal': 'ERROR_DATA'
+                        'signal': 'ERROR_DATA',
+                        'trigger_long': 0.0,
+                        'trigger_short': 0.0
                     }
         except Exception as e:
             self.log_event(f"Error in market tick: {self._exchange_error(e)}")
@@ -1009,7 +1025,7 @@ if __name__ == "__main__":
             balance_info = {'free': 5000.0, 'total': 5000.0}
             
             while True:
-                # Every 15 seconds, we fetch market data and check signals
+                # Every 30 seconds, we fetch market data and check signals
                 if bot.seconds_until_refresh <= 0:
                     try:
                         # Update Daily Scan scheduled times
@@ -1051,13 +1067,13 @@ if __name__ == "__main__":
                     
                     # Reset counter to 30 seconds to reduce rate limit pressure
                     bot.seconds_until_refresh = 30
-                    
-                    # Render the dashboard EVERY second to show countdowns ticking
-                    bot.render_dashboard(markets_state, balance_info)
-                    
-                    # Wait exactly 1 second
-                    time.sleep(1)
-                    bot.seconds_until_refresh -= 1
+
+                # Render the dashboard EVERY second to show countdowns ticking live
+                bot.render_dashboard(markets_state, balance_info)
+
+                # Wait exactly 1 second
+                time.sleep(1)
+                bot.seconds_until_refresh -= 1
                 
         except KeyboardInterrupt:
             print("\nExiting Live Monitor gracefully...")
