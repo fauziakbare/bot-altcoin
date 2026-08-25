@@ -1,6 +1,7 @@
 import os
 import time
 import sys
+import json
 import sqlite3
 import logging
 import threading
@@ -12,20 +13,17 @@ from dotenv import load_dotenv
 from contextlib import closing
 from binance import ThreadedWebsocketManager
 
-# Turso (SQLite-compatible cloud DB) - fallback if not available
+# Turso (cloud SQLite) is an optional cloud replica for remote access.
+# The local SQLite file is always the authoritative store, so trade history
+# survives Turso downtime, expired tokens, or network loss.
 try:
     from libsql_experimental import connect as turso_connect
     TURSO_AVAILABLE = True
 except ImportError:
     TURSO_AVAILABLE = False
-    # Fallback to local SQLite if Turso not installed
-    import sqlite3
-    def turso_connect(url, auth_token=None):
-        # Return a SQLite connection to local DB path
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'trade_history.db')
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        return sqlite3.connect(db_path)
-    print("[WARN] libsql-experimental not available, falling back to local SQLite")
+    turso_connect = None
+    print("[WARN] libsql-experimental not installed — history saved to local SQLite only. "
+          "Run: pip install libsql-experimental")
 
 # Import Rich components for a stunning terminal UI
 try:
@@ -72,12 +70,132 @@ VOL_SMA_PERIOD = 20
 ROUND_TRIP_FRICTION = 0.0014
 
 # ==========================================
-# PERMANENT PNL DATABASE (SQLite)
+# PERMANENT PNL DATABASE (local mirror + Turso cloud)
 # ==========================================
-# SQLite database storing the full trade history permanently.
+# The local SQLite file is the AUTHORITATIVE store: every closed trade lands
+# there first, so a Turso outage or expired token can never lose history.
+# Turso is a cloud replica for remote access. Rows that fail to reach Turso are
+# marked synced=0 locally and replayed on the next successful connection.
 # Path is anchored to the script directory -> always found no matter the CWD.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'data', 'trade_history.db')
+# Last-resort spool: one JSON object per line, written only when BOTH stores fail.
+SPOOL_PATH = os.path.join(BASE_DIR, 'data', 'trade_history_spool.jsonl')
+
+# Single source of truth for the `trades` payload column order.
+# Every schema, INSERT, SELECT, row tuple, and JSON key below is derived from
+# this tuple, so a column can never drift between writer and reader.
+TRADE_COLUMNS = (
+    'timestamp',
+    'symbol',
+    'side',
+    'quantity',
+    'entry_price',
+    'exit_price',
+    'net_return_pct',
+    'exit_reason',
+)
+
+# JSON keys exposed by the API, in TRADE_COLUMNS order.
+TRADE_JSON_KEYS = (
+    'timestamp',
+    'symbol',
+    'side',
+    'quantity',
+    'entry',
+    'exit',
+    'return_pct',
+    'reason',
+)
+
+_COLUMN_TYPES = {
+    'timestamp': 'TEXT',
+    'symbol': 'TEXT',
+    'side': 'TEXT',
+    'quantity': 'REAL',
+    'entry_price': 'REAL',
+    'exit_price': 'REAL',
+    'net_return_pct': 'REAL',
+    'exit_reason': 'TEXT',
+}
+
+_COLUMN_DEFS = ',\n        '.join(
+    f"{name:<14} {_COLUMN_TYPES[name]}" for name in TRADE_COLUMNS
+)
+_COLUMN_LIST = ', '.join(TRADE_COLUMNS)
+_PLACEHOLDERS = ', '.join('?' for _ in TRADE_COLUMNS)
+
+# Local mirror carries an extra `synced` flag (0 = not yet replicated to Turso).
+TRADES_SCHEMA_LOCAL = f"""
+    CREATE TABLE IF NOT EXISTS trades (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        {_COLUMN_DEFS},
+        synced         INTEGER NOT NULL DEFAULT 0
+    )
+"""
+
+# Turso mirror holds the payload columns only.
+TRADES_SCHEMA_CLOUD = f"""
+    CREATE TABLE IF NOT EXISTS trades (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        {_COLUMN_DEFS}
+    )
+"""
+
+TRADES_INSERT_LOCAL = f"""
+    INSERT INTO trades ({_COLUMN_LIST}, synced)
+    VALUES ({_PLACEHOLDERS}, ?)
+"""
+
+TRADES_INSERT_CLOUD = f"""
+    INSERT INTO trades ({_COLUMN_LIST})
+    VALUES ({_PLACEHOLDERS})
+"""
+
+# Ordering uses timestamp (wall clock, comparable across stores) and only falls
+# back to id for ties. `id` sequences are independent per store, so id alone
+# would not produce the same window in the local mirror and in Turso.
+TRADES_SELECT = f"""
+    SELECT {_COLUMN_LIST}
+    FROM trades
+    ORDER BY timestamp DESC, id DESC
+    LIMIT ?
+"""
+
+TRADES_SELECT_UNSYNCED = f"""
+    SELECT id, {_COLUMN_LIST}
+    FROM trades
+    WHERE synced = 0
+    ORDER BY id ASC
+    LIMIT ?
+"""
+
+
+def rows_to_trades(rows):
+    """Maps DB rows (in TRADE_COLUMNS order) to API dicts (TRADE_JSON_KEYS)."""
+    return [dict(zip(TRADE_JSON_KEYS, row)) for row in rows]
+
+
+def ensure_local_schema(conn):
+    """
+    Creates the local `trades` table and adds the `synced` column when an older
+    database file predates it, so an existing mirror keeps working after upgrade.
+    """
+    conn.execute(TRADES_SCHEMA_LOCAL)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+    if 'synced' not in existing:
+        # Pre-existing rows were written before replication tracking existed;
+        # default them to synced so they are not replayed to Turso wholesale.
+        conn.execute("ALTER TABLE trades ADD COLUMN synced INTEGER NOT NULL DEFAULT 1")
+
+
+def redact_db_url(url):
+    """Returns the host of a libsql URL for logging, never the full secret URL."""
+    if not url:
+        return "(unset)"
+    host = str(url).split('://', 1)[-1].split('/', 1)[0]
+    return host or "(unknown host)"
+
 
 # KAPAN SCANNING DIJALANKAN (PILIHAN JAM DALAM WIB)
 # Jam 7 = 07:00 WIB (Daily Close Binance - Rekomendasi Utama EBTA)
@@ -336,11 +454,15 @@ class RealExecutionRotatorBot:
         else:
             self.log_event("🟡 No WebSocket subscriptions — market data via REST cache only.")
 
-        # Turso configuration (cloud SQLite)
+        # Turso configuration (optional cloud replica of the local mirror)
         self.turso_url = os.getenv("TURSO_DB_URL")
         self.turso_token = os.getenv("TURSO_AUTH_TOKEN")
-        self.use_turso = TURSO_AVAILABLE and self.turso_url and self.turso_token
+        self.turso_configured = bool(TURSO_AVAILABLE and self.turso_url and self.turso_token)
         self.db_conn = None
+        # db_conn is touched by the bot worker thread and by Turso replay, so
+        # every use is serialized through this lock.
+        self._db_lock = threading.Lock()
+        self.local_db_ready = False
         
         self.positions = {}  # Tracks real active positions
         self.active_assets = []  # Curated koin to trade
@@ -404,96 +526,211 @@ class RealExecutionRotatorBot:
 
     def init_database(self):
         """
-        Checks and initializes the database (Turso if configured, else local SQLite).
-        Creates the `trades` table if it does not exist.
+        Prepares the trade-history stores:
+          - local SQLite  -> authoritative, always written first
+          - Turso (cloud) -> optional replica for remote access
+        A Turso failure never blocks the local write.
+        """
+        # --- Local SQLite (authoritative) ---
+        try:
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+                ensure_local_schema(conn)
+            self.local_db_ready = True
+            self.log_event(f"🗄️ SQLite lokal siap: {DB_PATH}")
+        except Exception as e:
+            self.local_db_ready = False
+            self.log_event(f"❌ GAGAL INISIALISASI SQLite lokal: {str(e)} "
+                           "— history akan ditulis ke spool file.")
+
+        # --- Turso cloud (replica) ---
+        if not TURSO_AVAILABLE:
+            self.log_event("⚠️ libsql-experimental belum terpasang — history hanya ke SQLite lokal. "
+                           "Jalankan: pip install libsql-experimental")
+            return
+        if not self.turso_url or not self.turso_token:
+            self.log_event("⚠️ TURSO_DB_URL / TURSO_AUTH_TOKEN belum diset di .env — "
+                           "history hanya ke SQLite lokal.")
+            return
+        self._connect_turso(log_success=True)
+
+    def _connect_turso(self, log_success=False):
+        """
+        Opens (or reopens) the Turso connection and ensures its schema.
+        Returns True when self.db_conn is usable. Safe to call repeatedly:
+        used both at startup and to recover after a dropped connection.
+        Caller must hold self._db_lock, or call before worker threads start.
+        """
+        if not self.turso_configured:
+            return False
+        try:
+            conn = turso_connect(self.turso_url, auth_token=self.turso_token)
+            conn.execute(TRADES_SCHEMA_CLOUD)
+            conn.commit()
+            self.db_conn = conn
+            if log_success:
+                self.log_event(f"🗄️ Turso database siap: {redact_db_url(self.turso_url)}")
+            return True
+        except Exception as e:
+            self.db_conn = None
+            self.log_event(f"❌ Koneksi Turso gagal ({redact_db_url(self.turso_url)}): {str(e)} "
+                           "— history tetap tersimpan di SQLite lokal.")
+            return False
+
+    def _spool_trade(self, row, reason):
+        """
+        Last-resort persistence: appends the trade as one JSON line so a closed
+        position is never silently lost when the local database is unusable.
+        Returns True when the row reached the spool file.
         """
         try:
-            if self.use_turso:
-                # Turso connection
-                self.db_conn = turso_connect(self.turso_url, auth_token=self.turso_token)
-                self.db_conn.execute("""
-                    CREATE TABLE IF NOT EXISTS trades (
-                        id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp      TEXT,
-                        symbol         TEXT,
-                        side           TEXT,
-                        quantity       REAL,
-                        entry_price    REAL,
-                        exit_price     REAL,
-                        net_return_pct REAL,
-                        exit_reason    TEXT
-                    )
-                """)
-                self.log_event(f"🗄️ Turso database siap: {self.turso_url}")
-            else:
-                # Fallback to local SQLite
-                os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-                with closing(sqlite3.connect(DB_PATH)) as conn, conn:
-                    conn.execute("""
-                        CREATE TABLE IF NOT EXISTS trades (
-                            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                            timestamp      TEXT,
-                            symbol         TEXT,
-                            side           TEXT,
-                            quantity       REAL,
-                            entry_price    REAL,
-                            exit_price     REAL,
-                            net_return_pct REAL,
-                            exit_reason    TEXT
-                        )
-                    """)
-                self.log_event(f"🗄️ SQLite database siap: {DB_PATH}")
+            os.makedirs(os.path.dirname(SPOOL_PATH), exist_ok=True)
+            record = dict(zip(TRADE_COLUMNS, row))
+            record['spooled_because'] = reason
+            with open(SPOOL_PATH, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            return True
         except Exception as e:
-            self.log_event(f"❌ GAGAL INISIALISASI database: {str(e)}")
+            self.log_event(f"❌ GAGAL menulis spool file: {str(e)}")
+            return False
+
+    def _replay_unsynced_to_turso(self, limit=200):
+        """
+        Pushes locally stored rows that never reached Turso (synced = 0).
+        Called after a successful Turso write so a recovered connection
+        automatically closes the replication gap instead of leaving it forever.
+        Caller must hold self._db_lock.
+        """
+        if self.db_conn is None or not self.local_db_ready:
+            return 0
+        try:
+            with closing(sqlite3.connect(DB_PATH)) as conn:
+                pending = conn.execute(TRADES_SELECT_UNSYNCED, (limit,)).fetchall()
+        except Exception as e:
+            self.log_event(f"⚠️ Gagal membaca baris unsynced: {str(e)}")
+            return 0
+
+        replayed = []
+        for record in pending:
+            row_id, payload = record[0], tuple(record[1:])
+            try:
+                self.db_conn.execute(TRADES_INSERT_CLOUD, payload)
+                self.db_conn.commit()
+                replayed.append(row_id)
+            except Exception as e:
+                self.log_event(f"⚠️ Replay ke Turso terhenti pada id={row_id}: {str(e)}")
+                break
+
+        if not replayed:
+            return 0
+
+        try:
+            with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+                conn.executemany(
+                    "UPDATE trades SET synced = 1 WHERE id = ?",
+                    [(row_id,) for row_id in replayed],
+                )
+        except Exception as e:
+            # Rows are in Turso but still flagged unsynced locally: the next
+            # replay would duplicate them, so this is surfaced loudly.
+            self.log_event(f"❌ Baris sudah masuk Turso tapi gagal ditandai synced: {str(e)}")
+            return len(replayed)
+
+        self.log_event(f"🔁 {len(replayed)} trade unsynced berhasil direplikasi ke Turso.")
+        return len(replayed)
 
     def save_trade_record(self, symbol, side, quantity, entry_price, exit_price, net_return_pct, exit_reason):
         """
-        Permanently inserts a closed trade into the database (Turso or SQLite).
+        Persists one closed trade. The local SQLite row is authoritative and is
+        written first; Turso replication is attempted after and may fail without
+        losing data (the row stays flagged synced = 0 for later replay).
+
+        Returns a dict describing where the row landed:
+            {'local': bool, 'turso': bool, 'spooled': bool, 'persisted': bool}
+        `persisted` is False only when the trade reached no store at all.
         """
-        try:
-            if self.use_turso and self.db_conn:
-                self.db_conn.execute(
-                    """
-                    INSERT INTO trades
-                        (timestamp, symbol, side, quantity, entry_price,
-                         exit_price, net_return_pct, exit_reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        symbol,
-                        side,
-                        quantity,
-                        entry_price,
-                        exit_price,
-                        round(net_return_pct, 4),
-                        exit_reason
-                    )
-                )
-                self.db_conn.commit()
-            else:
+        row = (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            symbol,
+            side,
+            quantity,
+            entry_price,
+            exit_price,
+            round(net_return_pct, 4),
+            exit_reason,
+        )
+
+        result = {'local': False, 'turso': False, 'spooled': False, 'persisted': False}
+
+        # --- 1. Local SQLite (authoritative) ---
+        local_error = None
+        if self.local_db_ready:
+            try:
                 with closing(sqlite3.connect(DB_PATH)) as conn, conn:
-                    conn.execute(
-                        """
-                        INSERT INTO trades
-                            (timestamp, symbol, side, quantity, entry_price,
-                             exit_price, net_return_pct, exit_reason)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            symbol,
-                            side,
-                            quantity,
-                            entry_price,
-                            exit_price,
-                            round(net_return_pct, 4),
-                            exit_reason
-                        )
-                    )
-            self.log_event("💾 Trade record permanently saved.")
-        except Exception as e:
-            self.log_event(f"❌ GAGAL MENYIMPAN trade record: {str(e)}")
+                    conn.execute(TRADES_INSERT_LOCAL, row + (0,))
+                result['local'] = True
+            except Exception as e:
+                local_error = str(e)
+                self.log_event(f"❌ GAGAL simpan trade ke SQLite lokal: {local_error}")
+        else:
+            local_error = "SQLite lokal tidak siap"
+
+        # --- 2. Turso replica (best effort, reconnect once on failure) ---
+        if self.turso_configured:
+            with self._db_lock:
+                if self.db_conn is None:
+                    self._connect_turso()
+                if self.db_conn is not None:
+                    try:
+                        self.db_conn.execute(TRADES_INSERT_CLOUD, row)
+                        self.db_conn.commit()
+                        result['turso'] = True
+                    except Exception as e:
+                        self.log_event(f"⚠️ Simpan ke Turso gagal, mencoba sambung ulang: {str(e)}")
+                        self.db_conn = None
+                        if self._connect_turso():
+                            try:
+                                self.db_conn.execute(TRADES_INSERT_CLOUD, row)
+                                self.db_conn.commit()
+                                result['turso'] = True
+                            except Exception as e2:
+                                self.db_conn = None
+                                self.log_event(f"❌ GAGAL simpan trade ke Turso: {str(e2)}")
+
+                # Mark this row synced and drain any earlier backlog.
+                if result['turso'] and result['local']:
+                    try:
+                        with closing(sqlite3.connect(DB_PATH)) as conn, conn:
+                            conn.execute(
+                                "UPDATE trades SET synced = 1 WHERE id = "
+                                "(SELECT MAX(id) FROM trades)"
+                            )
+                    except Exception as e:
+                        self.log_event(f"⚠️ Gagal menandai baris synced: {str(e)}")
+                if result['turso']:
+                    self._replay_unsynced_to_turso()
+
+        # --- 3. Spool file (only when the authoritative store failed) ---
+        if not result['local']:
+            result['spooled'] = self._spool_trade(row, local_error or "unknown")
+
+        result['persisted'] = result['local'] or result['turso'] or result['spooled']
+
+        if result['local'] and result['turso']:
+            self.log_event("💾 Trade record tersimpan: SQLite lokal + Turso.")
+        elif result['local']:
+            detail = "Turso belum aktif" if not self.turso_configured else "Turso gagal — akan direplay"
+            self.log_event(f"💾 Trade record tersimpan di SQLite lokal ({detail}).")
+        elif result['turso'] and result['spooled']:
+            self.log_event("⚠️ Trade record tersimpan di Turso + spool file, TAPI SQLite lokal gagal.")
+        elif result['turso']:
+            self.log_event("⚠️ Trade record HANYA tersimpan di Turso (SQLite lokal & spool gagal).")
+        elif result['spooled']:
+            self.log_event("⚠️ Trade record hanya tersimpan di spool file — perlu diimport manual.")
+        else:
+            self.log_event("❌ Trade record TIDAK tersimpan di mana pun (SQLite, Turso, spool gagal).")
+
+        return result
 
     def calculate_next_scan_time(self):
         """
@@ -788,7 +1025,7 @@ class RealExecutionRotatorBot:
             self.realized_pnl += COLLATERAL_PER_TRADE * net_ret
 
             # Permanently save the closed trade (leveraged net return incl. 0.14% friction)
-            self.save_trade_record(
+            save_result = self.save_trade_record(
                 symbol=symbol,
                 side=side,
                 quantity=quantity,
@@ -799,6 +1036,14 @@ class RealExecutionRotatorBot:
             )
 
             self.log_event(f"🏁 POSISI TERTUTUP: {side} {symbol} @ {executed_price:.5f} | Net Return: {net_ret*100:+.2f}% (Friction Applied)")
+            if not save_result.get('persisted'):
+                # The exchange position is closed for real, so it must be dropped
+                # from memory; make the lost history record impossible to miss.
+                self.log_event(
+                    f"❌ CATATAN HILANG: {side} {symbol} @ {executed_price:.5f} "
+                    f"({net_ret*100:+.2f}%, {reason}) gagal disimpan ke SEMUA store. "
+                    "Catat manual — posisi tetap ditutup di exchange."
+                )
             del self.positions[symbol]
             
         except Exception as e:

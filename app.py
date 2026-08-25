@@ -1,14 +1,24 @@
 import os
 import time
+import sqlite3
 import threading
 import logging
 from datetime import datetime
+from contextlib import closing
 from flask import Flask, request, Response, jsonify
 from functools import wraps
 from dotenv import load_dotenv
 
-# Import bot class from main script
-from live_testnet_monitor_v6 import RealExecutionRotatorBot, TOTAL_BOT_BUDGET, TOTAL_BOT_BUDGET
+# Import bot class + shared config/SQL from main script so the writer and the
+# reader can never disagree about schema, column order, or JSON keys.
+from live_testnet_monitor_v6 import (
+    RealExecutionRotatorBot,
+    TOTAL_BOT_BUDGET,
+    DB_PATH,
+    TRADES_SELECT,
+    ensure_local_schema,
+    rows_to_trades,
+)
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
@@ -252,7 +262,7 @@ def index():
                 </tbody>
             </table>
             <hr>
-            <h2>Trade History</h2>
+            <h2>Trade History <span id="pendingSync" style="font-size:12px;font-weight:normal;color:#666"></span></h2>
             <table>
                 <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Return %</th><th>Reason</th></tr>
                 <tbody id="tradeRows"><tr><td colspan="8">Loading...</td></tr></tbody>
@@ -294,13 +304,22 @@ def index():
 
                 // Fetch trade history
                 const tr = await fetch('/api/trades');
-                const trades = await tr.json();
-                let thtml = '';
-                for (const t of trades) {{
-                    const retColor = t.return_pct >= 0 ? 'green' : 'red';
-                    thtml += '<tr><td>' + t.timestamp + '</td><td>' + t.symbol.split('/')[0] + '</td><td>' + t.side + '</td><td>' + t.quantity.toFixed(4) + '</td><td>' + t.entry.toFixed(5) + '</td><td>' + t.exit.toFixed(5) + '</td><td style="color:' + retColor + '">' + t.return_pct.toFixed(2) + '%</td><td>' + t.reason + '</td></tr>';
+                const td = await tr.json();
+                const tbody = document.getElementById('tradeRows');
+                if (td.error) {{
+                    tbody.innerHTML = '<tr><td colspan="8" style="color:#ef4444">History unavailable</td></tr>';
+                }} else {{
+                    let thtml = '';
+                    for (const t of (td.trades || [])) {{
+                        const retColor = t.return_pct >= 0 ? 'green' : 'red';
+                        thtml += '<tr><td>' + t.timestamp + '</td><td>' + t.symbol.split('/')[0] + '</td><td>' + t.side + '</td><td>' + t.quantity.toFixed(4) + '</td><td>' + t.entry.toFixed(5) + '</td><td>' + t.exit.toFixed(5) + '</td><td style="color:' + retColor + '">' + t.return_pct.toFixed(2) + '%</td><td>' + t.reason + '</td></tr>';
+                    }}
+                    tbody.innerHTML = thtml || '<tr><td colspan="8">No trades yet</td></tr>';
+                    const sync = document.getElementById('pendingSync');
+                    if (sync) {{
+                        sync.textContent = td.pending_sync > 0 ? (td.pending_sync + ' menunggu sync ke Turso') : 'tersinkron';
+                    }}
                 }}
-                document.getElementById('tradeRows').innerHTML = thtml || '<tr><td colspan="8">No trades yet</td></tr>';
             }} catch (e) {{}}
         }}
         setInterval(refresh, 1000);
@@ -359,31 +378,43 @@ def api_live():
 def ping():
     return "pong", 200
 
+TRADES_LIMIT = 100
+
 @app.route('/api/trades')
 @requires_auth
 def api_trades():
-    if bot is None or not hasattr(bot, 'db_conn') or bot.db_conn is None:
-        return jsonify([])
+    """
+    Reads trade history from the local SQLite store, which is authoritative:
+    every closed trade is written there first, so it is never behind Turso.
+
+    Uses a fresh per-request connection instead of the bot's Turso handle:
+    that handle belongs to the bot worker thread and is not safe to share.
+
+    Response shape: {'trades': [...], 'error': str|None, 'pending_sync': int}
+    `error` lets the dashboard distinguish "store unavailable" from "no trades".
+    """
+    if not os.path.exists(DB_PATH):
+        return jsonify({'trades': [], 'error': None, 'pending_sync': 0})
     try:
-        cursor = bot.db_conn.cursor()
-        cursor.execute("SELECT timestamp, symbol, side, quantity, entry_price, exit_price, net_return_pct, exit_reason FROM trades ORDER BY id DESC LIMIT 100")
-        rows = cursor.fetchall()
-        trades = []
-        for row in rows:
-            trades.append({
-                'timestamp': row[0],
-                'symbol': row[1],
-                'side': row[2],
-                'quantity': row[3],
-                'entry': row[4],
-                'exit': row[5],
-                'return_pct': row[6],
-                'reason': row[7]
-            })
-        return jsonify(trades)
+        with closing(sqlite3.connect(DB_PATH)) as conn:
+            ensure_local_schema(conn)
+            conn.commit()
+            rows = conn.execute(TRADES_SELECT, (TRADES_LIMIT,)).fetchall()
+            pending = conn.execute("SELECT COUNT(*) FROM trades WHERE synced = 0").fetchone()[0]
+        return jsonify({
+            'trades': rows_to_trades(rows),
+            'error': None,
+            'pending_sync': pending,
+        })
     except Exception as e:
-        logger.error("Error fetching trades: %s", e)
-        return jsonify([])
+        logger.error("Trade history read failed: %s", e)
+        # Report the failure instead of an empty list, so an unreachable store
+        # is never rendered as a legitimately empty history.
+        return jsonify({
+            'trades': [],
+            'error': 'history unavailable',
+            'pending_sync': 0,
+        }), 503
 
 @app.route('/status')
 @requires_auth
