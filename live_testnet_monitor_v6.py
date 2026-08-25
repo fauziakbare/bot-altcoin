@@ -1009,12 +1009,13 @@ class RealExecutionRotatorBot:
             }
             
             self.log_event(f"🚀 POSISI TERBUKA: {side} {symbol} @ {executed_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Qty: {quantity}")
+            side_emoji = "📈" if side == 'LONG' else "📉"
             self._notify(
-                f"POSISI TERBUKA\n"
-                f"{side} {symbol.split('/')[0]} @ {executed_price:.5f}\n"
-                f"SL {sl:.5f} / TP {tp:.5f}\n"
-                f"Qty {quantity}\n"
-                f"Margin {COLLATERAL_PER_TRADE:.2f} USDT | {LEVERAGE}x"
+                f"🚀 POSISI TERBUKA\n"
+                f"{side_emoji} {side} {symbol.split('/')[0]} @ {executed_price:.5f}\n"
+                f"🛑 SL {sl:.5f} / 🎯 TP {tp:.5f}\n"
+                f"📦 Qty {quantity}\n"
+                f"🎫 Margin {COLLATERAL_PER_TRADE:.2f} USDT | ⚡ {LEVERAGE}x"
             )
             
         except Exception as e:
@@ -1060,13 +1061,25 @@ class RealExecutionRotatorBot:
 
             self.log_event(f"🏁 POSISI TERTUTUP: {side} {symbol} @ {executed_price:.5f} | Net Return: {net_ret*100:+.2f}% (Friction Applied)")
             equity = TOTAL_BOT_BUDGET + self.realized_pnl
+            # Emoji mirror the sign/reason so the outcome is readable at a glance
+            # on a phone notification; the numbers are always printed too.
+            side_emoji = "📈" if side == 'LONG' else "📉"
+            pnl_emoji = "🟢" if net_ret > 0 else ("🔴" if net_ret < 0 else "⚪")
+            if "TAKE_PROFIT" in reason:
+                reason_emoji = "🎯"
+            elif "TRAILING_STOP" in reason:
+                reason_emoji = "🛑"
+            elif "REGIME_EXIT" in reason:
+                reason_emoji = "🌫️"
+            else:
+                reason_emoji = "🏁"
             self._notify(
-                f"POSISI TERTUTUP\n"
-                f"{side} {symbol.split('/')[0]} @ {executed_price:.5f}\n"
-                f"Entry {entry:.5f}\n"
-                f"Net {net_ret*100:+.2f}% ({COLLATERAL_PER_TRADE * net_ret:+.2f} USDT)\n"
-                f"Alasan: {reason}\n"
-                f"Saldo bot: {equity:.2f} USDT"
+                f"{pnl_emoji} POSISI TERTUTUP\n"
+                f"{side_emoji} {side} {symbol.split('/')[0]} @ {executed_price:.5f}\n"
+                f"🎬 Entry {entry:.5f}\n"
+                f"{pnl_emoji} Net {net_ret*100:+.2f}% ({COLLATERAL_PER_TRADE * net_ret:+.2f} USDT)\n"
+                f"{reason_emoji} Alasan: {reason}\n"
+                f"💵 Saldo bot: {equity:.2f} USDT"
             )
             if not save_result.get('persisted'):
                 # The exchange position is closed for real, so it must be dropped
@@ -1077,7 +1090,7 @@ class RealExecutionRotatorBot:
                     "Catat manual — posisi tetap ditutup di exchange."
                 )
                 self._notify(
-                    f"PERINGATAN: catatan trade {side} {symbol.split('/')[0]} "
+                    f"🚨 PERINGATAN: catatan trade {side} {symbol.split('/')[0]} "
                     f"@ {executed_price:.5f} ({net_ret*100:+.2f}%) gagal disimpan "
                     "ke semua store. Catat manual."
                 )

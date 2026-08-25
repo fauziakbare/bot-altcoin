@@ -60,6 +60,74 @@ def _truncate(text):
     return text[:MAX_MESSAGE_CHARS - 20] + "\n... (dipotong)"
 
 
+# ---------------------------------------------------------------------------
+# Emoji helpers
+# ---------------------------------------------------------------------------
+# Emoji are decorative only: every value they accompany is also printed as text,
+# so the message stays readable if a client cannot render them.
+
+def emo_pnl(value):
+    """Profit/loss indicator."""
+    if value > 0:
+        return "🟢"
+    if value < 0:
+        return "🔴"
+    return "⚪"
+
+
+def emo_side(side):
+    """Position direction."""
+    return "📈" if side == "LONG" else "📉"
+
+
+def emo_trend(trend):
+    """EMA200 trend regime."""
+    if trend == "BULLISH":
+        return "🐂"
+    if trend == "BEARISH":
+        return "🐻"
+    return "❔"
+
+
+def emo_adx(adx):
+    """ADX regime: trending vs choppy."""
+    return "🔥" if adx >= 25 else "😴"
+
+
+def emo_vol(vol_ratio):
+    """Volume confirmation against its 20-period SMA."""
+    return "🔊" if vol_ratio >= 1.5 else "🔇"
+
+
+def emo_signal(signal):
+    """Current strategy state."""
+    if "BUY" in signal:
+        return "🚀"
+    if "SELL" in signal:
+        return "🩸"
+    if "HOLDING" in signal:
+        return "✋"
+    if "ERROR" in signal or "NO_DATA" in signal:
+        return "⚠️"
+    return "⏳"
+
+
+def emo_reason(reason):
+    """Exit reason category."""
+    if "TAKE_PROFIT" in reason:
+        return "🎯"
+    if "TRAILING_STOP" in reason:
+        return "🛑"
+    if "REGIME_EXIT" in reason:
+        return "🌫️"
+    return "🏁"
+
+
+def emo_health(ok):
+    """Store/service health."""
+    return "✅" if ok else "❌"
+
+
 class TelegramBridge:
     """
     Long-polling Telegram client running in its own daemon thread.
@@ -156,7 +224,7 @@ class TelegramBridge:
 
         handler = self.COMMANDS.get(command)
         if handler is None:
-            self.send(chat_id, f"Command {command} tidak dikenal. Kirim /help.")
+            self.send(chat_id, f"❓ Command {command} tidak dikenal. Kirim /help.")
             return
         self.send(chat_id, handler(self, args))
 
@@ -166,17 +234,17 @@ class TelegramBridge:
 
     def cmd_help(self, args):
         return (
-            "PANTAU BOT TRADING\n\n"
-            "/status   - status bot, aset aktif, jadwal scan, penyimpanan\n"
-            "/market   - metrik 15m aset aktif (harga, ADX, volume, signal)\n"
-            "/posisi   - posisi terbuka + P&L live\n"
-            "/saldo    - saldo bot, realized P&L, margin per trade\n"
-            "/history  - trade terakhir (contoh: /history 10, maks 20)\n"
-            "/stats    - rekap win rate, profit, loss\n"
-            "/log      - 10 log terbaru\n"
-            "/help     - pesan ini\n\n"
-            "Notifikasi otomatis dikirim saat posisi dibuka dan ditutup.\n"
-            "Bot ini hanya baca — tidak ada command untuk kirim order."
+            "🤖 PANTAU BOT TRADING\n\n"
+            "📊 /status   - status bot, aset aktif, jadwal scan, penyimpanan\n"
+            "📈 /market   - metrik 15m aset aktif (harga, ADX, volume, signal)\n"
+            "💼 /posisi   - posisi terbuka + P&L live\n"
+            "💰 /saldo    - saldo bot, realized P&L, margin per trade\n"
+            "📜 /history  - trade terakhir (contoh: /history 10, maks 20)\n"
+            "🏆 /stats    - rekap win rate, profit, loss\n"
+            "📋 /log      - 10 log terbaru\n"
+            "❓ /help     - pesan ini\n\n"
+            "🔔 Notifikasi otomatis dikirim saat posisi dibuka dan ditutup.\n"
+            "🔒 Bot ini hanya baca — tidak ada command untuk kirim order."
         )
 
     def cmd_status(self, args):
@@ -184,17 +252,17 @@ class TelegramBridge:
         running = self._running_provider()
         if bot is None:
             return (
-                f"Bot worker : {'AKTIF' if running else 'BERHENTI'}\n"
-                "Instance belum siap (masih inisialisasi / pre-fetch candle)."
+                f"{'🟢' if running else '🔴'} Bot worker : {'AKTIF' if running else 'BERHENTI'}\n"
+                "⏳ Instance belum siap (masih inisialisasi / pre-fetch candle)."
             )
 
         lines = [
-            f"Status     : {'RUNNING' if running else 'STOPPED'}",
-            f"Aset aktif : {', '.join(s.split('/')[0] for s in bot.active_assets) or '-'}",
-            f"Posisi buka: {len(bot.positions)}",
+            f"{'🟢' if running else '🔴'} Status     : {'RUNNING' if running else 'STOPPED'}",
+            f"🎯 Aset aktif : {', '.join(s.split('/')[0] for s in bot.active_assets) or '-'}",
+            f"💼 Posisi buka: {len(bot.positions)}",
         ]
         last = bot.last_scan_time
-        lines.append(f"Scan akhir : {last.strftime('%Y-%m-%d %H:%M:%S') if last else 'Belum'}")
+        lines.append(f"🕐 Scan akhir : {last.strftime('%Y-%m-%d %H:%M:%S') if last else 'Belum'}")
 
         nxt = bot.next_scan_time
         if nxt:
@@ -202,61 +270,60 @@ class TelegramBridge:
             if secs > 0:
                 hours, rem = divmod(secs, 3600)
                 minutes, _ = divmod(rem, 60)
-                lines.append(f"Scan next  : {hours:02d}j {minutes:02d}m (pukul {SCHEDULED_SCAN_HOUR:02d}:00)")
+                lines.append(f"⏰ Scan next  : {hours:02d}j {minutes:02d}m (pukul {SCHEDULED_SCAN_HOUR:02d}:00)")
             else:
-                lines.append("Scan next  : sedang berjalan")
+                lines.append("🔄 Scan next  : sedang berjalan")
 
-        store = []
-        if getattr(bot, "local_db_ready", False):
-            store.append("SQLite lokal OK")
-        else:
-            store.append("SQLite lokal GAGAL")
+        local_ok = bool(getattr(bot, "local_db_ready", False))
+        store = [f"{emo_health(local_ok)} SQLite lokal {'OK' if local_ok else 'GAGAL'}"]
         if getattr(bot, "db_conn", None) is not None:
-            store.append("Turso OK")
+            store.append("✅ Turso OK")
         elif getattr(bot, "turso_configured", False):
-            store.append("Turso terputus")
+            store.append("⚠️ Turso terputus")
         else:
-            store.append("Turso tidak aktif")
-        lines.append(f"Penyimpanan: {', '.join(store)}")
+            store.append("➖ Turso tidak aktif")
+        lines.append(f"🗄️ Penyimpanan: {', '.join(store)}")
 
         uptime = datetime.now() - self.started_at
         hours, rem = divmod(int(uptime.total_seconds()), 3600)
         minutes, _ = divmod(rem, 60)
-        lines.append(f"Uptime     : {hours}j {minutes}m")
+        lines.append(f"⏱️ Uptime     : {hours}j {minutes}m")
         return "\n".join(lines)
 
     def cmd_market(self, args):
         bot = self._bot()
         if bot is None:
-            return "Instance bot belum siap."
+            return "⏳ Instance bot belum siap."
         if not bot.active_assets:
-            return "Belum ada aset aktif. Menunggu scan harian."
+            return "🔍 Belum ada aset aktif. Menunggu scan harian."
 
         blocks = []
         for symbol in bot.active_assets:
             state = bot.markets_state.get(symbol)
             name = symbol.split("/")[0]
             if not state:
-                blocks.append(f"{name}: belum ada data")
+                blocks.append(f"⚠️ {name}: belum ada data")
                 continue
             adx = state["adx"]
             vol = state["vol_ratio"]
+            trend = state["trend"]
+            signal = state["signal"]
             blocks.append(
-                f"{name} @ {state['price']:.5f}\n"
-                f"  Trend  : {state['trend']}\n"
-                f"  ADX    : {adx:.1f} ({'TREND' if adx >= 25 else 'CHOP'})\n"
-                f"  Volume : {vol:.2f}x ({'OK' if vol >= 1.5 else 'lemah'})\n"
-                f"  Signal : {state['signal']}\n"
-                f"  Trigger: L {state['trigger_long']:.5f} / S {state['trigger_short']:.5f}"
+                f"🪙 {name} @ {state['price']:.5f}\n"
+                f"  {emo_trend(trend)} Trend  : {trend}\n"
+                f"  {emo_adx(adx)} ADX    : {adx:.1f} ({'TREND' if adx >= 25 else 'CHOP'})\n"
+                f"  {emo_vol(vol)} Volume : {vol:.2f}x ({'OK' if vol >= 1.5 else 'lemah'})\n"
+                f"  {emo_signal(signal)} Signal : {signal}\n"
+                f"  🎚️ Trigger: L {state['trigger_long']:.5f} / S {state['trigger_short']:.5f}"
             )
-        return "METRIK 15M\n\n" + "\n\n".join(blocks)
+        return "📈 METRIK 15M\n\n" + "\n\n".join(blocks)
 
     def cmd_posisi(self, args):
         bot = self._bot()
         if bot is None:
-            return "Instance bot belum siap."
+            return "⏳ Instance bot belum siap."
         if not bot.positions:
-            return "Tidak ada posisi terbuka."
+            return "😴 Tidak ada posisi terbuka."
 
         blocks = []
         total_pnl = 0.0
@@ -270,14 +337,17 @@ class TelegramBridge:
             pnl_usdt = COLLATERAL_PER_TRADE * raw * LEVERAGE
             total_pnl += pnl_usdt
             blocks.append(
-                f"{symbol.split('/')[0]} {side}\n"
-                f"  Entry : {entry:.5f} ({pos.get('entry_time', '-')})\n"
-                f"  Now   : {price:.5f}\n"
-                f"  Qty   : {pos['quantity']}\n"
-                f"  SL/TP : {pos['sl']:.5f} / {pos['tp']:.5f}\n"
-                f"  P&L   : {pnl_pct:+.2f}% ({pnl_usdt:+.2f} USDT)"
+                f"{emo_side(side)} {symbol.split('/')[0]} {side}\n"
+                f"  🎬 Entry : {entry:.5f} ({pos.get('entry_time', '-')})\n"
+                f"  💵 Now   : {price:.5f}\n"
+                f"  📦 Qty   : {pos['quantity']}\n"
+                f"  🛑 SL/TP : {pos['sl']:.5f} / {pos['tp']:.5f}\n"
+                f"  {emo_pnl(pnl_pct)} P&L   : {pnl_pct:+.2f}% ({pnl_usdt:+.2f} USDT)"
             )
-        header = f"POSISI TERBUKA ({len(bot.positions)})\nTotal unrealized: {total_pnl:+.2f} USDT\n\n"
+        header = (
+            f"💼 POSISI TERBUKA ({len(bot.positions)})\n"
+            f"{emo_pnl(total_pnl)} Total unrealized: {total_pnl:+.2f} USDT\n\n"
+        )
         return header + "\n\n".join(blocks)
 
     def cmd_saldo(self, args):
@@ -296,16 +366,16 @@ class TelegramBridge:
                 unrealized += COLLATERAL_PER_TRADE * raw * LEVERAGE
 
         lines = [
-            f"Budget awal  : {TOTAL_BOT_BUDGET:.2f} USDT",
-            f"Realized P&L : {realized:+.2f} USDT ({pct:+.2f}%)",
-            f"Saldo bot    : {equity:.2f} USDT",
+            f"🏦 Budget awal  : {TOTAL_BOT_BUDGET:.2f} USDT",
+            f"{emo_pnl(realized)} Realized P&L : {realized:+.2f} USDT ({pct:+.2f}%)",
+            f"💵 Saldo bot    : {equity:.2f} USDT",
         ]
         if bot and bot.positions:
-            lines.append(f"Unrealized   : {unrealized:+.2f} USDT")
-            lines.append(f"Equity kini  : {equity + unrealized:.2f} USDT")
-        lines.append(f"Margin/trade : {COLLATERAL_PER_TRADE:.2f} USDT")
-        lines.append(f"Leverage     : {LEVERAGE}x")
-        return "SALDO BOT\n\n" + "\n".join(lines)
+            lines.append(f"{emo_pnl(unrealized)} Unrealized   : {unrealized:+.2f} USDT")
+            lines.append(f"📊 Equity kini  : {equity + unrealized:.2f} USDT")
+        lines.append(f"🎫 Margin/trade : {COLLATERAL_PER_TRADE:.2f} USDT")
+        lines.append(f"⚡ Leverage     : {LEVERAGE}x")
+        return "💰 SALDO BOT\n\n" + "\n".join(lines)
 
     def cmd_history(self, args):
         limit = HISTORY_DEFAULT
@@ -313,10 +383,10 @@ class TelegramBridge:
             try:
                 limit = max(1, min(HISTORY_MAX, int(args[0])))
             except ValueError:
-                return f"Jumlah tidak valid. Contoh: /history 10 (maks {HISTORY_MAX})"
+                return f"⚠️ Jumlah tidak valid. Contoh: /history 10 (maks {HISTORY_MAX})"
 
         if not os.path.exists(DB_PATH):
-            return "Belum ada database history."
+            return "📭 Belum ada database history."
         try:
             with closing(sqlite3.connect(DB_PATH)) as conn:
                 ensure_local_schema(conn)
@@ -328,28 +398,29 @@ class TelegramBridge:
                 ).fetchone()[0]
         except Exception as e:
             logger.error("Gagal baca history: %s", e)
-            return "Gagal membaca history — store tidak terbaca."
+            return "❌ Gagal membaca history — store tidak terbaca."
 
         if not rows:
-            return "Belum ada trade tertutup."
+            return "📭 Belum ada trade tertutup."
 
         blocks = []
         for t in rows_to_trades(rows):
+            ret = t["return_pct"]
             blocks.append(
-                f"{t['timestamp']}\n"
-                f"  {t['symbol'].split('/')[0]} {t['side']} x{t['quantity']}\n"
-                f"  {t['entry']:.5f} -> {t['exit']:.5f}\n"
-                f"  Net   : {t['return_pct']:+.2f}%\n"
-                f"  Alasan: {t['reason']}"
+                f"🕐 {t['timestamp']}\n"
+                f"  {emo_side(t['side'])} {t['symbol'].split('/')[0]} {t['side']} x{t['quantity']}\n"
+                f"  ➡️ {t['entry']:.5f} → {t['exit']:.5f}\n"
+                f"  {emo_pnl(ret)} Net   : {ret:+.2f}%\n"
+                f"  {emo_reason(t['reason'])} Alasan: {t['reason']}"
             )
         footer = ""
         if pending:
-            footer = f"\n\n{pending} baris belum tersinkron ke Turso."
-        return f"HISTORY ({len(blocks)} dari {total})\n\n" + "\n\n".join(blocks) + footer
+            footer = f"\n\n⏳ {pending} baris belum tersinkron ke Turso."
+        return f"📜 HISTORY ({len(blocks)} dari {total})\n\n" + "\n\n".join(blocks) + footer
 
     def cmd_stats(self, args):
         if not os.path.exists(DB_PATH):
-            return "Belum ada database history."
+            return "📭 Belum ada database history."
         try:
             with closing(sqlite3.connect(DB_PATH)) as conn:
                 ensure_local_schema(conn)
@@ -367,11 +438,11 @@ class TelegramBridge:
                 ).fetchall()
         except Exception as e:
             logger.error("Gagal baca stats: %s", e)
-            return "Gagal membaca statistik — store tidak terbaca."
+            return "❌ Gagal membaca statistik — store tidak terbaca."
 
         total, wins, sum_pct, avg_pct, best, worst = row
         if not total:
-            return "Belum ada trade tertutup."
+            return "📭 Belum ada trade tertutup."
 
         wins = wins or 0
         losses = total - wins
@@ -379,27 +450,28 @@ class TelegramBridge:
         # Each trade is sized at COLLATERAL_PER_TRADE, so a percentage return
         # converts to USDT at that fixed notional.
         pnl_usdt = (sum_pct or 0.0) / 100 * COLLATERAL_PER_TRADE
+        total_pct = sum_pct or 0.0
 
         lines = [
-            f"Total trade : {total}",
-            f"Menang/kalah: {wins}/{losses}",
-            f"Win rate    : {win_rate:.1f}%",
-            f"Total net   : {sum_pct or 0.0:+.2f}% ({pnl_usdt:+.2f} USDT)",
-            f"Rata-rata   : {avg_pct or 0.0:+.2f}% per trade",
-            f"Terbaik     : {best or 0.0:+.2f}%",
-            f"Terburuk    : {worst or 0.0:+.2f}%",
+            f"🔢 Total trade : {total}",
+            f"⚔️ Menang/kalah: {wins}/{losses}",
+            f"{'🟢' if win_rate >= 50 else '🔴'} Win rate    : {win_rate:.1f}%",
+            f"{emo_pnl(total_pct)} Total net   : {total_pct:+.2f}% ({pnl_usdt:+.2f} USDT)",
+            f"{emo_pnl(avg_pct or 0.0)} Rata-rata   : {avg_pct or 0.0:+.2f}% per trade",
+            f"🥇 Terbaik     : {best or 0.0:+.2f}%",
+            f"🥶 Terburuk    : {worst or 0.0:+.2f}%",
         ]
         if by_reason:
-            lines.append("\nAlasan keluar:")
+            lines.append("\n🚪 Alasan keluar:")
             for reason, count in by_reason:
                 lines.append(f"  {reason}: {count}")
-        return "STATISTIK\n\n" + "\n".join(lines)
+        return "🏆 STATISTIK\n\n" + "\n".join(lines)
 
     def cmd_log(self, args):
         bot = self._bot()
         if bot is None or not getattr(bot, "logs", None):
-            return "Belum ada log."
-        return "LOG TERBARU\n\n" + "\n".join(bot.logs[-LOG_LINES:])
+            return "📭 Belum ada log."
+        return "📋 LOG TERBARU\n\n" + "\n".join(bot.logs[-LOG_LINES:])
 
     COMMANDS = {
         "/start": cmd_help,

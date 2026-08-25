@@ -52,8 +52,9 @@ def main():
         app.notifier = bridge
         threading.Thread(target=bridge.run, name="telegram", daemon=True).start()
         bridge.broadcast(
-            "BOT DIMULAI\n"
-            "Trading loop aktif. Kirim /help untuk daftar command."
+            "🤖 BOT DIMULAI\n"
+            "✅ Trading loop aktif.\n"
+            "❓ Kirim /help untuk daftar command."
         )
 
     try:
