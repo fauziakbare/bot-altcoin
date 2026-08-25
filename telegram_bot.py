@@ -316,6 +316,10 @@ class TelegramBridge:
                 f"  {emo_signal(signal)} Signal : {signal}\n"
                 f"  🎚️ Trigger: L {state['trigger_long']:.5f} / S {state['trigger_short']:.5f}"
             )
+            pend = state.get("pending_orders")
+            if pend:
+                for line in pend:
+                    blocks.append(f"  ⏰ {line}")
         return "📈 METRIK 15M\n\n" + "\n\n".join(blocks)
 
     def cmd_posisi(self, args):
