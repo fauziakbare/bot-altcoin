@@ -221,7 +221,7 @@ def redact_db_url(url):
 # KAPAN SCANNING DIJALANKAN (PILIHAN JAM DALAM WIB)
 # Jam 7 = 07:00 WIB (Daily Close Binance - Rekomendasi Utama EBTA)
 # Jam 22 = 22:00 WIB (2 Jam setelah US Market Open - Rekomendasi Taktis Volatilitas)
-SCHEDULED_SCAN_HOUR = 7  # Ganti ke 22 jika ingin taktik volatilitas US session
+SCHEDULED_SCAN_HOUR = 22  # Ganti ke 7 jika ingin daily close Binance
 
 # Live UI ticks down every second; market metrics/balance refresh on this cadence.
 REFRESH_INTERVAL_SECONDS = 15
