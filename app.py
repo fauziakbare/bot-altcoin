@@ -8,7 +8,7 @@ from functools import wraps
 from dotenv import load_dotenv
 
 # Import bot class from main script
-from live_testnet_monitor_v6 import RealExecutionRotatorBot
+from live_testnet_monitor_v6 import RealExecutionRotatorBot, TOTAL_BOT_BUDGET, TOTAL_BOT_BUDGET
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
