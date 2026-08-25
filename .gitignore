@@ -19,3 +19,9 @@ data/
 *.csv
 *.parquet
 figures/
+
+# Logs
+logs/
+
+# Kilo config (local)
+.kilo/
