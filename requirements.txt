@@ -16,3 +16,4 @@ rich>=13.0.0
 # Web server for Render free web service
 Flask>=2.3.0
 python-binance>=1.0.0
+libsql-experimental>=0.0.20

@@ -349,6 +349,7 @@ class RealExecutionRotatorBot:
         self.next_scan_time = None
         self.markets_state = {}
         self.balance_info = {'free': 0.0, 'total': 0.0}
+        self.realized_pnl = 0.0  # Virtual P&L in USDT for bot balance
         
         # Live 15-second refresh countdown trackers
         self.seconds_until_refresh = 0  # Force immediate refresh on start
@@ -783,6 +784,8 @@ class RealExecutionRotatorBot:
                 raw_ret = (entry - executed_price) / entry
                 
             net_ret = (raw_ret * LEVERAGE) - (ROUND_TRIP_FRICTION * LEVERAGE)
+            # Update virtual bot balance: profit = collateral * net_ret (net_ret is fraction, e.g., 0.05 for 5%)
+            self.realized_pnl += COLLATERAL_PER_TRADE * net_ret
 
             # Permanently save the closed trade (leveraged net return incl. 0.14% friction)
             self.save_trade_record(

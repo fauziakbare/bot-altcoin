@@ -63,9 +63,30 @@ def bot_worker():
         # Replicate the main loop from v6 __main__ (lines 779-826)
         bot.seconds_until_refresh = 0
         markets_state = {}
-        balance_info = {'free': 5000.0, 'total': 5000.0}
+        # Virtual balance: start with TOTAL_BOT_BUDGET and track realized P&L
+        balance_info = {'free': TOTAL_BOT_BUDGET, 'total': TOTAL_BOT_BUDGET}
 
         while True:
+            # Update market data every second from cache (WebSocket)
+            try:
+                for symbol in bot.active_assets:
+                    df = bot.fetch_market_data(symbol)
+                    if df is not None:
+                        last_row = df.iloc[-1]
+                        vol_sma = last_row['vol_sma']
+                        markets_state[symbol] = {
+                            'price': last_row['close'],
+                            'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
+                            'adx': last_row['adx'],
+                            'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
+                            'signal': 'WAITING',  # will be updated on refresh
+                            'trigger_long': last_row['donchian_high'],
+                            'trigger_short': last_row['donchian_low']
+                        }
+            except Exception as e:
+                logger.error("Error in market data update: %s", e)
+
+            # Refresh signals and balance periodically (every 5 seconds)
             if bot.seconds_until_refresh <= 0:
                 try:
                     if bot.last_scan_time is None or datetime.now() >= bot.next_scan_time:
@@ -73,38 +94,24 @@ def bot_worker():
                 except Exception as e:
                     logger.error("Error in daily scan: %s", e)
 
-                try:
-                    balance = bot.trade_client.fetch_balance()
-                    usdt_free = balance['free'].get('USDT', 5000.0)
-                    usdt_total = balance['total'].get('USDT', 5000.0)
-                    balance_info = {'free': usdt_free, 'total': usdt_total}
-                except Exception as e:
-                    logger.error("Error fetching balance: %s", e)
-                    balance_info = {'free': 0.0, 'total': 0.0}
-
+                # Update signals (may open/close positions)
                 try:
                     for symbol in bot.active_assets:
                         df = bot.fetch_market_data(symbol)
                         if df is not None:
-                            last_row = df.iloc[-1]
                             signal = bot.check_signals(symbol, df)
-                            vol_sma = last_row['vol_sma']
-                            markets_state[symbol] = {
-                                'price': last_row['close'],
-                                'trend': 'BULLISH' if last_row['close'] > last_row['ema_200'] else 'BEARISH',
-                                'adx': last_row['adx'],
-                                'vol_ratio': last_row['volume'] / vol_sma if vol_sma > 0 else 1.0,
-                                'signal': signal,
-                                'trigger_long': last_row['donchian_high'],
-                                'trigger_short': last_row['donchian_low']
-                            }
+                            if symbol in markets_state:
+                                markets_state[symbol]['signal'] = signal
                 except Exception as e:
-                    logger.error("Error in market tick: %s", e)
+                    logger.error("Error in signal check: %s", e)
 
-                bot.seconds_until_refresh = 15
+                # Update virtual balance (based on realized P&L)
+                bot.balance_info = {'free': TOTAL_BOT_BUDGET + bot.realized_pnl, 'total': TOTAL_BOT_BUDGET + bot.realized_pnl}
+                balance_info = bot.balance_info
+
+                bot.seconds_until_refresh = 5  # refresh signals and balance every 5 seconds
 
             bot.markets_state = markets_state
-            bot.balance_info = balance_info
             bot.render_dashboard(markets_state, balance_info)
             time.sleep(1)
             bot.seconds_until_refresh -= 1
@@ -211,7 +218,8 @@ def index():
             <div class="info"><span class="status">Last scan:</span> <span id="lastScan">{last_scan}</span></div>
             <div class="info"><span class="status">Next scan in:</span> {countdown}</div>
             <div class="info"><span class="status">Open positions:</span> <span id="posCount">{positions_count}</span></div>
-            <div class="info"><span class="status">USDT Balance:</span> <span id="balanceFree">{balance_info['free']:.2f}</span> (free) / {balance_info['total']:.2f} (total)</div>
+            <div class="info"><span class="status">USDT Balance (Bot):</span> <span id="balanceFree">{balance_info['free']:.2f}</span></div>
+            <div class="info"><span class="status">Live Time:</span> <span id="liveClock">--:--:--</span></div>
             <div class="info"><span class="status">Bot worker:</span> {'Active' if bot_running else 'Stopped'}</div>
             <hr>
             <h2>Market Data</h2>
@@ -242,6 +250,12 @@ def index():
                 <tbody id="posRows">
                 {pos_rows}
                 </tbody>
+            </table>
+            <hr>
+            <h2>Trade History</h2>
+            <table>
+                <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Return %</th><th>Reason</th></tr>
+                <tbody id="tradeRows"><tr><td colspan="8">Loading...</td></tr></tbody>
             </table>
             <hr>
             <div class="info">📊 <a href="/status">JSON status</a> &nbsp;|&nbsp; 🏓 <a href="/ping">Health check</a></div>
@@ -277,10 +291,27 @@ def index():
                         '%</td></tr>';
                 }}
                 document.getElementById('posRows').innerHTML = phtml || '<tr><td colspan="4">No active positions</td></tr>';
+
+                // Fetch trade history
+                const tr = await fetch('/api/trades');
+                const trades = await tr.json();
+                let thtml = '';
+                for (const t of trades) {{
+                    const retColor = t.return_pct >= 0 ? 'green' : 'red';
+                    thtml += '<tr><td>' + t.timestamp + '</td><td>' + t.symbol.split('/')[0] + '</td><td>' + t.side + '</td><td>' + t.quantity.toFixed(4) + '</td><td>' + t.entry.toFixed(5) + '</td><td>' + t.exit.toFixed(5) + '</td><td style="color:' + retColor + '">' + t.return_pct.toFixed(2) + '%</td><td>' + t.reason + '</td></tr>';
+                }}
+                document.getElementById('tradeRows').innerHTML = thtml || '<tr><td colspan="8">No trades yet</td></tr>';
             }} catch (e) {{}}
         }}
-        setInterval(refresh, 3000);
+        setInterval(refresh, 1000);
         refresh();
+        // Client-side clock
+        function updateClock() {{
+            const now = new Date();
+            document.getElementById('liveClock').textContent = now.toLocaleTimeString();
+        }}
+        setInterval(updateClock, 1000);
+        updateClock();
         </script>
     </html>
     """
@@ -327,6 +358,32 @@ def api_live():
 @app.route('/ping')
 def ping():
     return "pong", 200
+
+@app.route('/api/trades')
+@requires_auth
+def api_trades():
+    if bot is None or not hasattr(bot, 'db_conn') or bot.db_conn is None:
+        return jsonify([])
+    try:
+        cursor = bot.db_conn.cursor()
+        cursor.execute("SELECT timestamp, symbol, side, quantity, entry_price, exit_price, net_return_pct, exit_reason FROM trades ORDER BY id DESC LIMIT 100")
+        rows = cursor.fetchall()
+        trades = []
+        for row in rows:
+            trades.append({
+                'timestamp': row[0],
+                'symbol': row[1],
+                'side': row[2],
+                'quantity': row[3],
+                'entry': row[4],
+                'exit': row[5],
+                'return_pct': row[6],
+                'reason': row[7]
+            })
+        return jsonify(trades)
+    except Exception as e:
+        logger.error("Error fetching trades: %s", e)
+        return jsonify([])
 
 @app.route('/status')
 @requires_auth
