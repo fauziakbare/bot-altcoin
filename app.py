@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 # Import bot class + shared config/SQL from main script so the writer and the
 # reader can never disagree about schema, column order, or JSON keys.
-from live_testnet_monitor_v6 import (
+from live_testnet_monitor_v7 import (
     RealExecutionRotatorBot,
     TOTAL_BOT_BUDGET,
     REFRESH_INTERVAL_SECONDS,

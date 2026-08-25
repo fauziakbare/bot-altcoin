@@ -18,7 +18,7 @@ from datetime import datetime
 
 import requests
 
-from live_testnet_monitor_v6 import (
+from live_testnet_monitor_v7 import (
     COLLATERAL_PER_TRADE,
     DB_PATH,
     LEVERAGE,
