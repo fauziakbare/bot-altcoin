@@ -200,7 +200,12 @@ def redact_db_url(url):
 # KAPAN SCANNING DIJALANKAN (PILIHAN JAM DALAM WIB)
 # Jam 7 = 07:00 WIB (Daily Close Binance - Rekomendasi Utama EBTA)
 # Jam 22 = 22:00 WIB (2 Jam setelah US Market Open - Rekomendasi Taktis Volatilitas)
-SCHEDULED_SCAN_HOUR = 22  # Ganti ke 22 jika ingin 2 jam setelah bursa US buka
+SCHEDULED_SCAN_HOUR = 22  # Ganti ke 7 jika ingin daily close Binance
+
+# Live UI ticks down every second; market metrics/balance refresh on this cadence.
+REFRESH_INTERVAL_SECONDS = 15
+# Longer pause after an API error so a ban/outage is not hammered.
+ERROR_BACKOFF_SECONDS = 60
 
 # ==========================================
 # TECHNICAL INDICATORS CALCULATION
@@ -733,10 +738,10 @@ class RealExecutionRotatorBot:
         result['persisted'] = result['local'] or result['turso'] or result['spooled']
 
         if result['local'] and result['turso']:
-            self.log_event("💾 Trade record tersimpan: SQLite lokal + Turso.")
+            self.log_event("💾 Trade record permanently saved to SQLite database + Turso.")
         elif result['local']:
             detail = "Turso belum aktif" if not self.turso_configured else "Turso gagal — akan direplay"
-            self.log_event(f"💾 Trade record tersimpan di SQLite lokal ({detail}).")
+            self.log_event(f"💾 Trade record permanently saved to SQLite database ({detail}).")
         elif result['turso'] and result['spooled']:
             self.log_event("⚠️ Trade record tersimpan di Turso + spool file, TAPI SQLite lokal gagal.")
         elif result['turso']:
@@ -906,6 +911,82 @@ class RealExecutionRotatorBot:
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
         return calculate_indicators(df)
 
+    def evaluate_exit(self, symbol, df):
+        """
+        Evaluates trailing stop / take profit / regime exit for ONE open position.
+
+        Deliberately independent of self.active_assets: a position must keep being
+        managed after its asset is rotated out of the daily Top 2, otherwise the
+        stop and target stop being enforced and the position is orphaned on the
+        exchange. Returns the exit reason when closed, else None.
+        """
+        pos = self.positions.get(symbol)
+        if pos is None or df is None or len(df) < 2:
+            return None
+
+        last_row = df.iloc[-1]
+        current_price = last_row['close']
+        atr = last_row['atr']
+        adx = last_row['adx']
+        adx_active = adx >= 25
+
+        if pos['type'] == 'LONG':
+            if current_price > pos['peak_price']:
+                self.positions[symbol]['peak_price'] = current_price
+            trailing_sl = self.positions[symbol]['peak_price'] - (2.5 * atr)
+
+            if current_price <= trailing_sl:
+                reason = "TRAILING_STOP_HIT (ATR)"
+            elif current_price >= pos['tp']:
+                reason = "TAKE_PROFIT_HIT (5.0x ATR)"
+            elif not adx_active:  # Tri-State ADX Exit
+                reason = "REGIME_EXIT_ADX_LOW (<25)"
+            else:
+                return None
+        else:  # SHORT
+            if current_price < pos['peak_price']:
+                self.positions[symbol]['peak_price'] = current_price
+            trailing_sl = self.positions[symbol]['peak_price'] + (2.5 * atr)
+
+            if current_price >= trailing_sl:
+                reason = "TRAILING_STOP_HIT (ATR)"
+            elif current_price <= pos['tp']:
+                reason = "TAKE_PROFIT_HIT (5.0x ATR)"
+            elif not adx_active:
+                reason = "REGIME_EXIT_ADX_LOW (<25)"
+            else:
+                return None
+
+        self.close_position(symbol, current_price, reason)
+        return reason
+
+    def manage_open_positions(self):
+        """
+        Runs exit management for EVERY held position, including assets that are
+        no longer in the daily Top 2. Call this on every tick, before signal
+        evaluation, so a rotated-out position is never left unmanaged.
+
+        Returns {symbol: exit_reason} for positions closed on this pass.
+        """
+        closed = {}
+        # Snapshot the keys: close_position() mutates self.positions.
+        for symbol in list(self.positions.keys()):
+            try:
+                df = self.fetch_market_data(symbol)
+                if df is None:
+                    self.log_event(f"⚠️ Data {symbol} tidak tersedia — exit check dilewati tick ini.")
+                    continue
+                reason = self.evaluate_exit(symbol, df)
+                if reason:
+                    closed[symbol] = reason
+                    if symbol not in self.active_assets:
+                        self.log_event(
+                            f"🧹 Posisi rotated-out {symbol.split('/')[0]} ditutup ({reason})."
+                        )
+            except Exception as e:
+                self.log_event(f"❌ Gagal evaluasi exit {symbol}: {self._exchange_error(e)}")
+        return closed
+
     def check_signals(self, symbol, df):
         if df is None or len(df) < CANDLE_LIMIT:
             return "WAITING_FOR_DATA"
@@ -930,34 +1011,13 @@ class RealExecutionRotatorBot:
         breakout_above = prev_row['close'] <= prev_row['donchian_high'] and current_price > donchian_high
         breakout_below = prev_row['close'] >= prev_row['donchian_low'] and current_price < donchian_low
 
-        # Active Position Exit Checks
+        # Active Position Exit Checks.
+        # manage_open_positions() is the authoritative exit path (it covers
+        # rotated-out assets too); this keeps exits responsive for assets that
+        # are still active without duplicating the rules.
         if symbol in self.positions:
-            pos = self.positions[symbol]
-            if pos['type'] == 'LONG':
-                if current_price > pos['peak_price']:
-                    self.positions[symbol]['peak_price'] = current_price
-                trailing_sl = self.positions[symbol]['peak_price'] - (2.5 * atr)
-                
-                if current_price <= trailing_sl:
-                    self.close_position(symbol, current_price, "TRAILING_STOP_HIT (ATR)")
-                elif current_price >= pos['tp']:
-                    self.close_position(symbol, current_price, "TAKE_PROFIT_HIT (5.0x ATR)")
-                elif not adx_active:  # Tri-State ADX Exit
-                    self.close_position(symbol, current_price, "REGIME_EXIT_ADX_LOW (<25)")
-            
-            elif pos['type'] == 'SHORT':
-                if current_price < pos['peak_price']:
-                    self.positions[symbol]['peak_price'] = current_price
-                trailing_sl = self.positions[symbol]['peak_price'] + (2.5 * atr)
-                
-                if current_price >= trailing_sl:
-                    self.close_position(symbol, current_price, "TRAILING_STOP_HIT (ATR)")
-                elif current_price <= pos['tp']:
-                    self.close_position(symbol, current_price, "TAKE_PROFIT_HIT (5.0x ATR)")
-                elif not adx_active:  # Tri-State ADX Exit
-                    self.close_position(symbol, current_price, "REGIME_EXIT_ADX_LOW (<25)")
-            
-            return "HOLDING"
+            self.evaluate_exit(symbol, df)
+            return "HOLDING" if symbol in self.positions else "CLOSED"
 
         # New Position Entry Checks
         if trend_bullish and breakout_above and adx_active and volume_confirmed:
@@ -971,10 +1031,27 @@ class RealExecutionRotatorBot:
 
     def open_position(self, symbol, side, entry_price, atr):
         """
-        Executes a real MARKET order on Binance USD-M Testnet using COLLATERAL_PER_TRADE = 50 USDT.
+        Executes a real MARKET order on Binance USD-M Testnet using
+        COLLATERAL_PER_TRADE margin at LEVERAGE.
+
+        Guardrails enforced before any order is sent:
+          - never open a second position on a symbol already held
+          - never exceed MAX_ACTIVE_COINS concurrent positions, so total
+            committed margin stays within TOTAL_BOT_BUDGET
         """
+        if symbol in self.positions:
+            self.log_event(f"⏭️ {symbol.split('/')[0]} sudah ada posisi terbuka — entry dilewati.")
+            return
+        if len(self.positions) >= MAX_ACTIVE_COINS:
+            # Budget guard: MAX_ACTIVE_COINS x COLLATERAL_PER_TRADE == TOTAL_BOT_BUDGET.
+            self.log_event(
+                f"🚧 Batas {MAX_ACTIVE_COINS} posisi tercapai "
+                f"({', '.join(s.split('/')[0] for s in self.positions)}) — "
+                f"entry {symbol.split('/')[0]} ditunda."
+            )
+            return
         try:
-            # 1. Calculate actual size based on 50 USDT collateral & 10x leverage = 500 USDT notional
+            # 1. Size the order from the fixed per-trade collateral and leverage
             notional_value = COLLATERAL_PER_TRADE * LEVERAGE
             quantity = notional_value / entry_price
             
@@ -1244,23 +1321,34 @@ class RealExecutionRotatorBot:
         # 1. Trigger scheduled daily coin rotation scan
         if self.last_scan_time is None or datetime.now() >= self.next_scan_time:
             self.scan_daily_market()
-            
+
         markets_state = {}
         try:
             balance = self.trade_client.fetch_balance()
-            usdt_free = balance['free'].get('USDT', 5000.0)
-            usdt_total = balance['total'].get('USDT', 5000.0)
+            usdt_free = balance['free'].get('USDT', 0.0)
+            usdt_total = balance['total'].get('USDT', 0.0)
             balance_info = {'free': usdt_free, 'total': usdt_total}
         except Exception as e:
             self.log_event(f"Error fetching balance: {self._exchange_error(e)}")
-            balance_info = {'free': 5000.0, 'total': 5000.0}
+            balance_info = {'free': 0.0, 'total': 0.0}
+
+        # 2. Manage EVERY open position first, including assets rotated out of
+        #    the daily Top 2. Runs before signal evaluation so stops are never
+        #    skipped for an orphaned symbol.
+        closed_now = self.manage_open_positions()
 
         try:
             for symbol in self.active_assets:
                 df = self.fetch_market_data(symbol)
                 if df is not None:
                     last_row = df.iloc[-1]
-                    signal = self.check_signals(symbol, df)
+                    if symbol in closed_now:
+                        # Just exited on this tick: skip entry evaluation so the
+                        # same breakout cannot immediately re-open the position
+                        # and pay round-trip friction twice.
+                        signal = f"CLOSED: {closed_now[symbol]}"
+                    else:
+                        signal = self.check_signals(symbol, df)
 
                     vol_sma = last_row['vol_sma']
                     markets_state[symbol] = {
@@ -1285,6 +1373,10 @@ class RealExecutionRotatorBot:
         except Exception as e:
             self.log_event(f"Error in market tick: {self._exchange_error(e)}")
 
+        # Publish state so external readers (Telegram /market, web dashboard)
+        # observe the same snapshot the terminal UI renders.
+        self.markets_state = markets_state
+        self.balance_info = balance_info
         self.render_dashboard(markets_state, balance_info)
 
 # ==========================================
@@ -1322,10 +1414,19 @@ if __name__ == "__main__":
         try:
             bot.seconds_until_refresh = 0  # Force fetch on first run
             markets_state = {}
-            balance_info = {'free': 5000.0, 'total': 5000.0}
-            
+            balance_info = {'free': TOTAL_BOT_BUDGET, 'total': TOTAL_BOT_BUDGET}
+
             while True:
-                # Every 30 seconds, we fetch market data and check signals
+                # Exit management runs EVERY second for every held position,
+                # including assets rotated out of the daily Top 2. Kept outside
+                # the refresh gate so a stop is never delayed by the countdown.
+                closed_now = {}
+                try:
+                    closed_now = bot.manage_open_positions()
+                except Exception as e:
+                    bot.log_event(f"Error managing open positions: {bot._exchange_error(e)}")
+
+                # Every REFRESH_INTERVAL_SECONDS, refresh scan/balance/signals
                 if bot.seconds_until_refresh <= 0:
                     try:
                         # Update Daily Scan scheduled times
@@ -1337,19 +1438,25 @@ if __name__ == "__main__":
                     try:
                         # Fetch balance
                         balance = bot.trade_client.fetch_balance()
-                        usdt_free = balance['free'].get('USDT', 5000.0)
-                        usdt_total = balance['total'].get('USDT', 5000.0)
+                        usdt_free = balance['free'].get('USDT', 0.0)
+                        usdt_total = balance['total'].get('USDT', 0.0)
                         balance_info = {'free': usdt_free, 'total': usdt_total}
                     except Exception as e:
                         bot.log_event(f"Error fetching balance: {bot._exchange_error(e)}")
-                        balance_info = {'free': 5000.0, 'total': 5000.0}
+                        balance_info = {'free': 0.0, 'total': 0.0}
 
+                    backoff = False
                     try:
                         for symbol in bot.active_assets:
                             df = bot.fetch_market_data(symbol)
                             if df is not None:
                                 last_row = df.iloc[-1]
-                                signal = bot.check_signals(symbol, df)
+                                if symbol in closed_now:
+                                    # Exited this tick: skip entry so the same
+                                    # breakout cannot immediately re-enter.
+                                    signal = f"CLOSED: {closed_now[symbol]}"
+                                else:
+                                    signal = bot.check_signals(symbol, df)
                                 vol_sma = last_row['vol_sma']
                                 markets_state[symbol] = {
                                     'price': last_row['close'],
@@ -1362,11 +1469,10 @@ if __name__ == "__main__":
                                 }
                     except Exception as e:
                         bot.log_event(f"Error in market tick: {bot._exchange_error(e)}")
-                        # Back off on error to avoid hammering API
-                        bot.seconds_until_refresh = 60
-                    
-                    # Reset counter to 30 seconds to reduce rate limit pressure
-                    bot.seconds_until_refresh = 30
+                        backoff = True
+
+                    # Back off on error, otherwise use the standard 15s cadence.
+                    bot.seconds_until_refresh = ERROR_BACKOFF_SECONDS if backoff else REFRESH_INTERVAL_SECONDS
 
                 # Render the dashboard EVERY second to show countdowns ticking live
                 bot.render_dashboard(markets_state, balance_info)
@@ -1374,6 +1480,6 @@ if __name__ == "__main__":
                 # Wait exactly 1 second
                 time.sleep(1)
                 bot.seconds_until_refresh -= 1
-                
+
         except KeyboardInterrupt:
             print("\nExiting Live Monitor gracefully...")

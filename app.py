@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from live_testnet_monitor_v6 import (
     RealExecutionRotatorBot,
     TOTAL_BOT_BUDGET,
+    REFRESH_INTERVAL_SECONDS,
     DB_PATH,
     TRADES_SELECT,
     ensure_local_schema,
@@ -81,6 +82,15 @@ def bot_worker():
         balance_info = {'free': TOTAL_BOT_BUDGET, 'total': TOTAL_BOT_BUDGET}
 
         while True:
+            # Exit management for EVERY held position, including assets rotated
+            # out of the daily Top 2. Runs every second so a trailing stop or
+            # take profit is never delayed by the refresh countdown.
+            closed_now = {}
+            try:
+                closed_now = bot.manage_open_positions()
+            except Exception as e:
+                logger.error("Error managing open positions: %s", e)
+
             # Update market data every second from cache (WebSocket)
             try:
                 for symbol in bot.active_assets:
@@ -100,7 +110,7 @@ def bot_worker():
             except Exception as e:
                 logger.error("Error in market data update: %s", e)
 
-            # Refresh signals and balance periodically (every 5 seconds)
+            # Refresh signals and balance on the shared cadence
             if bot.seconds_until_refresh <= 0:
                 try:
                     if bot.last_scan_time is None or datetime.now() >= bot.next_scan_time:
@@ -113,7 +123,12 @@ def bot_worker():
                     for symbol in bot.active_assets:
                         df = bot.fetch_market_data(symbol)
                         if df is not None:
-                            signal = bot.check_signals(symbol, df)
+                            if symbol in closed_now:
+                                # Exited this tick: skip entry so the same
+                                # breakout cannot immediately re-enter.
+                                signal = f"CLOSED: {closed_now[symbol]}"
+                            else:
+                                signal = bot.check_signals(symbol, df)
                             if symbol in markets_state:
                                 markets_state[symbol]['signal'] = signal
                 except Exception as e:
@@ -123,7 +138,7 @@ def bot_worker():
                 bot.balance_info = {'free': TOTAL_BOT_BUDGET + bot.realized_pnl, 'total': TOTAL_BOT_BUDGET + bot.realized_pnl}
                 balance_info = bot.balance_info
 
-                bot.seconds_until_refresh = 5  # refresh signals and balance every 5 seconds
+                bot.seconds_until_refresh = REFRESH_INTERVAL_SECONDS
 
             bot.markets_state = markets_state
             bot.render_dashboard(markets_state, balance_info)
