@@ -17,3 +17,6 @@ rich>=13.0.0
 Flask>=2.3.0
 python-binance>=1.0.0
 libsql-experimental>=0.0.20
+
+# Telegram control surface (long polling)
+requests>=2.31.0

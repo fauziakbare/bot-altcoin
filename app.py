@@ -56,6 +56,8 @@ def requires_auth(f):
 bot = None
 bot_thread = None
 bot_running = False
+# Optional push-notification sink (set by run_bot.py before the worker starts).
+notifier = None
 
 def bot_worker():
     global bot, bot_running
@@ -67,6 +69,8 @@ def bot_worker():
             logger.error("Missing BINANCE_API_KEY or BINANCE_API_SECRET")
             return
         bot = RealExecutionRotatorBot(api_key=api_key, api_secret=api_secret, use_render_mode=True)
+        # Attach the notifier so position events reach Telegram.
+        bot.notifier = notifier
         bot_running = True
         logger.info("Bot worker started")
 
@@ -438,4 +442,13 @@ def start_bot_thread():
 if __name__ == "__main__":
     start_bot_thread()
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    # Bind to loopback by default: the dashboard is reachable only from the VPS
+    # itself (or through an SSH tunnel), never from the public internet.
+    # Set BIND_HOST=0.0.0.0 explicitly for a managed host like Render.
+    host = os.environ.get("BIND_HOST", "127.0.0.1")
+    if host == "0.0.0.0":
+        logger.warning(
+            "BIND_HOST=0.0.0.0 — dashboard terbuka ke jaringan publik, "
+            "hanya dijaga HTTP Basic Auth tanpa TLS."
+        )
+    app.run(host=host, port=port)

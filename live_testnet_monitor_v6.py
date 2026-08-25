@@ -463,6 +463,10 @@ class RealExecutionRotatorBot:
         # every use is serialized through this lock.
         self._db_lock = threading.Lock()
         self.local_db_ready = False
+
+        # Optional push-notification sink (attached by the Telegram bridge).
+        # Left as None so the bot runs unchanged when Telegram is not used.
+        self.notifier = None
         
         self.positions = {}  # Tracks real active positions
         self.active_assets = []  # Curated koin to trade
@@ -493,6 +497,18 @@ class RealExecutionRotatorBot:
             self.logs.pop(0)
         print(log_str)
         logging.info(log_str)
+
+    def _notify(self, text):
+        """
+        Pushes an event to the attached notifier (e.g. Telegram).
+        Never raises: a notification failure must not affect trading.
+        """
+        if self.notifier is None:
+            return
+        try:
+            self.notifier.broadcast(text)
+        except Exception as e:
+            logging.info("Notifier gagal mengirim: %s", type(e).__name__)
 
     @staticmethod
     def _is_ban(e):
@@ -993,6 +1009,13 @@ class RealExecutionRotatorBot:
             }
             
             self.log_event(f"🚀 POSISI TERBUKA: {side} {symbol} @ {executed_price:.5f} | SL: {sl:.5f} | TP: {tp:.5f} | Qty: {quantity}")
+            self._notify(
+                f"POSISI TERBUKA\n"
+                f"{side} {symbol.split('/')[0]} @ {executed_price:.5f}\n"
+                f"SL {sl:.5f} / TP {tp:.5f}\n"
+                f"Qty {quantity}\n"
+                f"Margin {COLLATERAL_PER_TRADE:.2f} USDT | {LEVERAGE}x"
+            )
             
         except Exception as e:
             self.log_event(f"❌ GAGAL MEMBUKA POSISI untuk {symbol}: {self._exchange_error(e)}")
@@ -1036,6 +1059,15 @@ class RealExecutionRotatorBot:
             )
 
             self.log_event(f"🏁 POSISI TERTUTUP: {side} {symbol} @ {executed_price:.5f} | Net Return: {net_ret*100:+.2f}% (Friction Applied)")
+            equity = TOTAL_BOT_BUDGET + self.realized_pnl
+            self._notify(
+                f"POSISI TERTUTUP\n"
+                f"{side} {symbol.split('/')[0]} @ {executed_price:.5f}\n"
+                f"Entry {entry:.5f}\n"
+                f"Net {net_ret*100:+.2f}% ({COLLATERAL_PER_TRADE * net_ret:+.2f} USDT)\n"
+                f"Alasan: {reason}\n"
+                f"Saldo bot: {equity:.2f} USDT"
+            )
             if not save_result.get('persisted'):
                 # The exchange position is closed for real, so it must be dropped
                 # from memory; make the lost history record impossible to miss.
@@ -1043,6 +1075,11 @@ class RealExecutionRotatorBot:
                     f"❌ CATATAN HILANG: {side} {symbol} @ {executed_price:.5f} "
                     f"({net_ret*100:+.2f}%, {reason}) gagal disimpan ke SEMUA store. "
                     "Catat manual — posisi tetap ditutup di exchange."
+                )
+                self._notify(
+                    f"PERINGATAN: catatan trade {side} {symbol.split('/')[0]} "
+                    f"@ {executed_price:.5f} ({net_ret*100:+.2f}%) gagal disimpan "
+                    "ke semua store. Catat manual."
                 )
             del self.positions[symbol]
             
