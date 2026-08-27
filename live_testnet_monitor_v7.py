@@ -499,6 +499,34 @@ class RealExecutionRotatorBot:
         # Initialize permanent PNL database (idempotent on every startup)
         self.init_database()
 
+        # Restore the virtual balance from persisted trade history so a restart
+        # does not reset the bot's balance back to the initial budget. Sums the
+        # net levered return of every closed trade, then maps it back to USDT.
+        self._load_realized_pnl_from_db()
+
+    def _load_realized_pnl_from_db(self):
+        """
+        Reconstructs realized_pnl (USDT) from the local SQLite trade history.
+        Each stored net_return_pct is the levered net return of one closed trade;
+        realized_pnl per trade equals COLLATERAL_PER_TRADE * (net_return_pct / 100).
+        Fails silently (leaving the balance at the base budget) if the DB is
+        unavailable or has no trades.
+        """
+        try:
+            with closing(sqlite3.connect(DB_PATH)) as conn:
+                total_pct = conn.execute(
+                    "SELECT COALESCE(SUM(net_return_pct), 0.0) FROM trades"
+                ).fetchone()[0]
+            self.realized_pnl = COLLATERAL_PER_TRADE * (float(total_pct) / 100.0)
+            if self.realized_pnl:
+                self.log_event(
+                    f"💵 Balance bot dipulihkan dari history: "
+                    f"{TOTAL_BOT_BUDGET + self.realized_pnl:.2f} USDT "
+                    f"(realized P&L {self.realized_pnl:+.2f} USDT)"
+                )
+        except Exception:
+            self.realized_pnl = 0.0
+
     def log_event(self, message):
         if not hasattr(self, 'logs'):
             self.logs = []
